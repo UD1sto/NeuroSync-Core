@@ -1,5 +1,7 @@
 # NeuroSync Local API
 
+> **Note:** This is an extended fork of the original NeuroSync Player + NeuroSync Local API which can be found at [https://github.com/AnimaVR](https://github.com/AnimaVR). All code in this repository falls under the original NeuroSync license.
+
 A Flask-based API to generate blendshapes for 3D facial animation from text or audio input.
 
 ## Features
