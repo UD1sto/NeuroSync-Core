@@ -24,7 +24,7 @@ A Flask-based API to generate blendshapes for 3D facial animation from text or a
 
 ### `/text_to_blendshapes` (POST)
 
-Convert text to speech and then generate blendshapes.
+Unified endpoint that converts text to speech via LLM, generates blendshapes, and automatically sends the animation to the connected 3D model via LiveLink.
 
 Request:
 ```json
@@ -41,9 +41,11 @@ Response:
 }
 ```
 
+**Note:** This endpoint now automatically sends the generated blendshapes to the 3D model through LiveLink, so you can see the animation in real-time without additional steps.
+
 ### `/audio_to_blendshapes` (POST)
 
-Generate blendshapes from audio.
+Generate blendshapes from audio and automatically send them to the connected 3D model.
 
 Request: Raw audio bytes (WAV format)
 
@@ -56,7 +58,7 @@ Response:
 
 ### `/stream_text_to_blendshapes` (POST)
 
-Stream the conversion of text to speech and blendshapes.
+Stream the conversion of text to speech and blendshapes. Sends the animation to the 3D model in real-time as chunks are processed.
 
 Request:
 ```json
@@ -83,6 +85,23 @@ Invoke-RestMethod -Uri "http://127.0.0.1:5000/text_to_blendshapes" -Method Post 
 $audioBytes = [System.IO.File]::ReadAllBytes("C:\path\to\sample.wav")
 Invoke-RestMethod -Uri "http://127.0.0.1:5000/audio_to_blendshapes" -Method Post -Body $audioBytes -ContentType "audio/wav"
 ```
+
+## Unified Processing Workflow
+
+The NeuroSync Local API now features a streamlined processing pipeline:
+
+1. **Text Input** → When you send text to the `/text_to_blendshapes` endpoint, the system:
+   - Processes your text through a language model (LLM)
+   - Converts the processed text to natural speech
+   - Generates facial blendshapes from the audio
+   - Automatically sends the animation to your 3D model via LiveLink
+
+2. **Real-time Animation** → All endpoints now automatically animate the connected 3D model:
+   - No additional steps required to visualize the animation
+   - Works with Unreal Engine through the NeuroSync Player and LiveLink
+   - Provides smooth, natural facial movements directly from text or audio input
+
+This unified workflow makes it easier than ever to create expressive 3D character animations from simple text prompts or audio files.
 
 ## Running the API
 
