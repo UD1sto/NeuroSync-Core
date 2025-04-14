@@ -20,6 +20,9 @@ from transformers import (
     VitsModel
 )
 import scipy.io.wavfile as wav
+import struct
+import socket
+import base64
 
 from utils.generate_face_shapes import generate_facial_data_from_bytes
 from utils.model.model import load_model
@@ -34,6 +37,11 @@ dotenv.load_dotenv()
 
 app = flask.Flask(__name__)
 
+# Configuration for audio streaming over UDP
+AUDIO_UDP_IP = os.getenv("AUDIO_UDP_IP", "127.0.0.1")
+AUDIO_UDP_PORT = int(os.getenv("AUDIO_UDP_PORT", "11112"))
+AUDIO_PACKET_SIZE = 1024  # Maximum size for UDP packet
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print("Activated device:", device)
 
@@ -43,6 +51,9 @@ blendshape_model = load_model(model_path, config, device)
 # Initialize PyFace and socket connection
 py_face = initialize_py_face()
 socket_connection = create_socket_connection()
+# Initialize audio UDP socket
+audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+print(f"Created audio socket for {AUDIO_UDP_IP}:{AUDIO_UDP_PORT}")
 default_animation_thread = threading.Thread(target=default_animation_loop, args=(py_face,))
 default_animation_thread.daemon = True
 default_animation_thread.start()
@@ -266,6 +277,33 @@ def tts_blendshape_worker(model, tokenizer, sample_rate, device):
         audio_blendshape_queue.put((None, None, None))  # Signal any consumers to stop
         return None, [], sample_rate
 
+def send_audio_over_udp(audio_data, sample_rate):
+    """Send audio data over UDP to remote endpoint"""
+    try:
+        # Prepare header with sample rate information
+        header = struct.pack('!I', sample_rate)
+        
+        # Send audio in chunks to avoid UDP packet size limitations
+        for i in range(0, len(audio_data), AUDIO_PACKET_SIZE):
+            chunk = audio_data[i:i+AUDIO_PACKET_SIZE]
+            
+            # Add sequence number to allow reconstruction on receiver side
+            seq_num = struct.pack('!I', i // AUDIO_PACKET_SIZE)
+            
+            # Combine header, sequence number and audio chunk
+            packet = header + seq_num + chunk
+            
+            # Send packet
+            audio_socket.sendto(packet, (AUDIO_UDP_IP, AUDIO_UDP_PORT))
+            
+            # Small delay to prevent flooding
+            time.sleep(0.001)
+            
+        print(f"{ColorText.BOLD}[Audio]{ColorText.END} Sent {len(audio_data)} bytes of audio to {AUDIO_UDP_IP}:{AUDIO_UDP_PORT}")
+        
+    except Exception as e:
+        print(f"{ColorText.RED}Error sending audio over UDP: {e}{ColorText.END}")
+
 @app.route('/audio_to_blendshapes', methods=['POST'])
 def audio_to_blendshapes_route():
     audio_bytes = request.data
@@ -385,9 +423,9 @@ def text_to_blendshapes_route():
         else:
             full_audio = b''
         
-        # Return the results
+        # Return the results - encode binary audio to base64
         return jsonify({
-            "audio": full_audio,
+            "audio": base64.b64encode(full_audio).decode('ascii') if full_audio else "",
             "blendshapes": all_blendshapes
         })
         
@@ -458,10 +496,13 @@ def stream_text_to_blendshapes_route():
                 if blendshapes:
                     all_blendshapes.extend(blendshapes)
                 
-                # Create response chunk
+                # Send audio chunk to remote endpoint
+                send_audio_over_udp(audio_bytes, models["sample_rate"])
+                
+                # Create response chunk - encode binary audio to base64
                 response_chunk = {
                     "chunk_id": chunk_id,
-                    "audio": audio_bytes,
+                    "audio": base64.b64encode(audio_bytes).decode('ascii'),
                     "blendshapes": blendshapes
                 }
                 
@@ -506,3 +547,4 @@ if __name__ == '__main__':
         if default_animation_thread and default_animation_thread.is_alive():
             default_animation_thread.join()
         socket_connection.close()
+        audio_socket.close()

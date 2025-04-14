@@ -5,15 +5,18 @@
 # # livelink_init.py
 
 import socket
+import os
 from livelink.connect.pylivelinkface import PyLiveLinkFace, FaceBlendShape
 
 
-UDP_IP = "127.0.0.1"
-UDP_PORT = 11111
+# Get UDP settings from environment variables with fallback defaults
+UDP_IP = os.getenv("BLENDSHAPES_UDP_IP", "127.0.0.1")
+UDP_PORT = int(os.getenv("BLENDSHAPES_UDP_PORT", "11111"))
 
 def create_socket_connection():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.connect((UDP_IP, UDP_PORT))
+    print(f"Connected blendshapes socket to {UDP_IP}:{UDP_PORT}")
     return s
 
 def initialize_py_face():
