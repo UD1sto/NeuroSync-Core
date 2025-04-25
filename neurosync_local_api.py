@@ -39,8 +39,29 @@ dotenv.load_dotenv()
 
 app = flask.Flask(__name__)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print("Activated device:", device)
+# Check for CUDA availability and respect USE_CUDA environment variable
+use_cuda_env = os.getenv("USE_CUDA", "auto").lower()
+cuda_available = torch.cuda.is_available()
+
+if use_cuda_env == "true":
+    if cuda_available:
+        device = torch.device('cuda')
+        print("✅ Using CUDA GPU acceleration")
+    else:
+        print("⚠️ CUDA requested but not available! Make sure PyTorch is installed with CUDA support and GPU drivers are updated.")
+        print("⚠️ Falling back to CPU mode")
+        device = torch.device('cpu')
+elif use_cuda_env == "false":
+    device = torch.device('cpu')
+    print("ℹ️ Using CPU mode (CUDA disabled by configuration)")
+else:  # "auto" or any other value
+    device = torch.device('cuda' if cuda_available else 'cpu')
+    if cuda_available:
+        print("✅ Using CUDA GPU acceleration (auto-detected)")
+    else:
+        print("ℹ️ CUDA not available, using CPU mode")
+
+print("🔧 Activated device:", device)
 
 model_path = 'utils/model/model.pth'
 blendshape_model = load_model(model_path, config, device)
@@ -513,7 +534,7 @@ def text_to_blendshapes_route():
             "audio": encoded_audio,
             "blendshapes": all_blendshapes
         })
-        
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
