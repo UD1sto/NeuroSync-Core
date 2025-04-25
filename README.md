@@ -13,12 +13,68 @@ A Flask-based API to generate blendshapes for 3D facial animation from text or a
 
 ## Installation
 
-1. Clone the repository
-2. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Place model file in `utils/model/model.pth`
+NeuroSync-Core supports a wide range of hardware configurations, from CPU-only setups to the latest NVIDIA GPUs.
+
+### Automatic Installation (Recommended)
+
+The easiest way to install NeuroSync-Core is to use our automatic installation script:
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/NeuroSync-Core.git
+cd NeuroSync-Core
+
+# Create and activate a virtual environment (recommended)
+python -m venv venv
+# On Windows:
+venv\Scripts\activate
+# On macOS/Linux:
+source venv/bin/activate
+
+# Run the installation script
+python install.py
+```
+
+The installation script will:
+1. Detect your hardware configuration
+2. Install the appropriate version of PyTorch based on your GPU/CUDA capabilities
+3. Install all other required dependencies
+4. Verify the installation
+
+### Manual Installation
+
+If you prefer to install manually or encounter issues with the automatic installation:
+
+#### 1. Install PyTorch with CUDA support
+
+Choose the appropriate command based on your CUDA version (check with `nvidia-smi`):
+
+**For CUDA 12.8 (latest GPUs)**:
+```bash
+pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
+pip install --pre torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
+```
+
+**For CUDA 12.1**:
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+**For CUDA 11.8**:
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+```
+
+**For CPU-only systems**:
+```bash
+pip install torch torchvision
+```
+
+#### 2. Install other dependencies
+
+```bash
+pip install numpy scipy flask pydub sounddevice transformers librosa
+```
 
 ## API Endpoints
 
@@ -105,11 +161,11 @@ This unified workflow makes it easier than ever to create expressive 3D characte
 
 ## Running the API
 
-```
+```bash
 python neurosync_local_api.py
 ```
 
-The server will start on http://127.0.0.1:5000
+This will start the local API server on http://127.0.0.1:5000
 
 ## 29/03/2025 Update to model.pth and model.py
 
@@ -147,3 +203,29 @@ You can find the NeuroSync Player and instructions on setting it up here:
 Visit [neurosync.info](https://neurosync.info)
 
 ## Talk to a NeuroSync prototype live on Twitch : [Visit Mai](https://www.twitch.tv/mai_anima_ai)
+
+## Troubleshooting
+
+### CUDA Issues
+
+If you encounter CUDA-related issues:
+
+1. Verify your CUDA installation with `nvidia-smi`
+2. Check if PyTorch can detect CUDA:
+   ```python
+   python -c "import torch; print(torch.cuda.is_available())"
+   ```
+3. Make sure your GPU drivers are up to date
+4. Try installing a different CUDA version of PyTorch
+
+For detailed diagnostics, run:
+```bash
+python cuda_check.py
+```
+
+## Hardware Requirements
+
+- **CPU-only**: Any modern CPU (slower performance)
+- **GPU (recommended)**: NVIDIA GPU with CUDA support
+- **Memory**: At least 8GB RAM (16GB+ recommended)
+- **Storage**: 5GB+ free space for models and application
