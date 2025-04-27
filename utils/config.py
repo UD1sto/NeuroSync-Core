@@ -35,6 +35,12 @@ LOCAL_TTS_URL = os.getenv("LOCAL_TTS_URL", "http://127.0.0.1:5000/tts")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "elevenlabs")
 
+# Bridge / System-2 integration
+ENABLE_SYSTEM2_BRIDGE = os.getenv("ENABLE_SYSTEM2_BRIDGE", "False").lower() == "true"
+BRIDGE_FILE_PATH = os.getenv("BRIDGE_FILE_PATH", "bridge.txt")
+MOCK_SYSTEM2 = os.getenv("MOCK_SYSTEM2", "False").lower() == "true"
+BRIDGE_DEBUG = os.getenv("BRIDGE_DEBUG", "False").lower() == "true"
+
 def setup_warnings():
     """Configure warning behavior for the application."""
     warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.functional")

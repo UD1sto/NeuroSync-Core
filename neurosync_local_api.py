@@ -36,6 +36,7 @@ from livelink.animations.default_animation import default_animation_loop, stop_d
 from livelink.send_to_unreal import apply_blink_to_facial_data # Added for blinking
 from utils.generated_runners import run_audio_animation, Player # Updated import
 from utils.model.blendshape_sequence import BlendshapeSequence # Add BlendshapeSequence import
+from utils.bridge import BridgeCache
 
 # Load environment variables
 dotenv.load_dotenv()
@@ -255,11 +256,16 @@ def llm_streaming_worker(model, tokenizer, prompt, device):
     print(f"\n{ColorText.BOLD}[LLM]{ColorText.END} Generating response...")
     
     try:
+        # Prepend bridge context if enabled
+        bridge_txt = BridgeCache.read()
+        full_prompt = bridge_txt + "\n" + prompt if bridge_txt else prompt
+        print(f"{ColorText.BOLD}[LLM]{ColorText.END} Full prompt: {full_prompt}")
+        
         # Initialize streamer
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
         
         # Prepare inputs
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        inputs = tokenizer(full_prompt, return_tensors="pt").to(device)
         
         # Create generation kwargs
         generation_kwargs = {

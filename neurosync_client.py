@@ -25,6 +25,7 @@ dotenv.load_dotenv()
 # Import our service interfaces
 from utils.llm.llm_service import LLMService, LLMProvider
 from utils.tts.tts_service import TTSService, TTSProvider
+from utils.bridge import BridgeCache
 
 # Optional: import for animation if we want to use it
 animation_available = False
@@ -246,8 +247,12 @@ def main():
                 
             print("\nGenerating response...\n")
             
-            # Format message for LLM
-            messages = [{"role": "user", "content": user_input}]
+            # Format message for LLM (include optional System-2 bridge context)
+            messages = []
+            bridge_txt = BridgeCache.read()
+            if bridge_txt:
+                messages.append({"role": "system", "content": bridge_txt})
+            messages.append({"role": "user", "content": user_input})
             
             # Process in streaming mode
             text_buffer = []
