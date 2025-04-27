@@ -22,6 +22,8 @@ from transformers import (
     VitsModel,
     utils
 )
+# Add bitsandbytes for quantization
+import bitsandbytes as bnb
 import scipy.io.wavfile as wav
 
 from utils.generate_face_shapes import generate_facial_data_from_bytes
@@ -32,7 +34,8 @@ from livelink.connect.livelink_init import create_socket_connection, initialize_
 from livelink.connect.pylivelinkface import FaceBlendShape # Added for real-time streaming
 from livelink.animations.default_animation import default_animation_loop, stop_default_animation, default_animation_data # Added for blinking
 from livelink.send_to_unreal import apply_blink_to_facial_data # Added for blinking
-from utils.generated_runners import run_audio_animation # Kept for non-streaming routes
+from utils.generated_runners import run_audio_animation, Player # Updated import
+from utils.model.blendshape_sequence import BlendshapeSequence # Add BlendshapeSequence import
 
 # Load environment variables
 dotenv.load_dotenv()
@@ -69,7 +72,7 @@ blendshape_model = load_model(model_path, config, device)
 # Initialize PyFace and socket connection
 py_face = initialize_py_face()
 socket_connection = create_socket_connection()
-default_animation_thread = threading.Thread(target=default_animation_loop, args=(py_face,))
+default_animation_thread = threading.Thread(target=default_animation_loop, args=(py_face, socket_connection))
 default_animation_thread.daemon = True
 default_animation_thread.start()
 
@@ -135,6 +138,10 @@ def load_llm_tts_models():
             print(f"{ColorText.BOLD}[Config]{ColorText.END} TRUST_REMOTE_CODE set to: {trust_remote_code_value}")
             print(f"{ColorText.BOLD}[Config]{ColorText.END} LLM Model: {llm_tts_config.llm_model}")
             
+            # Get quantization settings
+            quantization = os.getenv("QUANTIZATION", "").lower()
+            print(f"{ColorText.BOLD}[Config]{ColorText.END} Quantization: {quantization}")
+            
             # Check for existing cache
             cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
             if os.path.exists(cache_dir):
@@ -151,22 +158,59 @@ def load_llm_tts_models():
             os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
             os.environ["TRANSFORMERS_VERBOSITY"] = "info"
             
+            # Get HF token if available
+            hf_token = os.getenv("HF_TOKEN", None)
+            
             # Print the configuration to verify
             print(f"{ColorText.BOLD}[Debug]{ColorText.END} trust_remote_code set to: {trust_remote_code_value}")
             
-            # Load tokenizer with explicit trust_remote_code
-            print(f"{ColorText.BOLD}[LLM]{ColorText.END} Loading tokenizer with trust_remote_code={trust_remote_code_value}...")
+            # Load tokenizer with explicit trust_remote_code and use_fast=False to avoid sentencepiece requirement
+            print(f"{ColorText.BOLD}[LLM]{ColorText.END} Loading tokenizer with trust_remote_code={trust_remote_code_value} (slow version)...")
             llm_tokenizer = AutoTokenizer.from_pretrained(
                 llm_tts_config.llm_model,
-                trust_remote_code=trust_remote_code_value
+                trust_remote_code=trust_remote_code_value,
+                token=hf_token,
+                use_fast=False  # Use slow tokenizer to avoid sentencepiece requirement
             )
             
-            # Load model with explicit trust_remote_code
-            print(f"{ColorText.BOLD}[LLM]{ColorText.END} Loading model with trust_remote_code={trust_remote_code_value}...")
+            # Create model loading kwargs based on quantization settings
+            model_kwargs = {
+                "trust_remote_code": trust_remote_code_value,
+                "device_map": "auto",
+                "token": hf_token if hf_token and hf_token != "your_huggingface_token_here" else None
+            }
+            
+            # Add quantization parameters if enabled
+            if quantization == "fp8":
+                print(f"{ColorText.BOLD}[LLM]{ColorText.END} Enabling FP8 quantization...")
+                
+                # Get detailed quantization settings
+                quant_type = os.getenv("BNB_4BIT_QUANT_TYPE", "fp8")
+                use_double_quant = os.getenv("BNB_4BIT_USE_DOUBLE_QUANT", "false").lower() == "true"
+                compute_dtype_str = os.getenv("BNB_4BIT_COMPUTE_DTYPE", "bfloat16")
+                
+                # Convert compute dtype string to torch dtype
+                compute_dtype = torch.float16
+                if compute_dtype_str == "bfloat16":
+                    compute_dtype = torch.bfloat16
+                
+                # Add quantization parameters to model kwargs
+                model_kwargs.update({
+                    "load_in_4bit": True,
+                    "quantization_config": {
+                        "bnb_4bit_quant_type": quant_type,
+                        "bnb_4bit_use_double_quant": use_double_quant,
+                        "bnb_4bit_compute_dtype": compute_dtype
+                    }
+                })
+                
+                print(f"{ColorText.BOLD}[LLM]{ColorText.END} Quantization settings: type={quant_type}, double_quant={use_double_quant}, compute_dtype={compute_dtype_str}")
+            
+            # Load model with appropriate parameters
+            print(f"{ColorText.BOLD}[LLM]{ColorText.END} Loading model with quantization={quantization}...")
             llm_model = AutoModelForCausalLM.from_pretrained(
                 llm_tts_config.llm_model,
-                trust_remote_code=trust_remote_code_value,
-                device_map="auto"
+                **model_kwargs
             )
             
             # Set pad token to eos token if not set
@@ -176,8 +220,14 @@ def load_llm_tts_models():
             # Load TTS model
             print(f"\n{ColorText.BOLD}[TTS]{ColorText.END} Loading TTS model: {llm_tts_config.tts_model}...")
             print(f"{ColorText.YELLOW}If downloading, progress will be displayed below:{ColorText.END}")
-            tts_tokenizer = AutoTokenizer.from_pretrained(llm_tts_config.tts_model)
-            tts_model = VitsModel.from_pretrained(llm_tts_config.tts_model).to(device)
+            tts_tokenizer = AutoTokenizer.from_pretrained(
+                llm_tts_config.tts_model,
+                token=hf_token if hf_token and hf_token != "your_huggingface_token_here" else None
+            )
+            tts_model = VitsModel.from_pretrained(
+                llm_tts_config.tts_model,
+                token=hf_token if hf_token and hf_token != "your_huggingface_token_here" else None
+            ).to(device)
             
             # Get sample rate from model config
             sample_rate = tts_model.config.sampling_rate
@@ -297,6 +347,7 @@ def tts_blendshape_worker(model, tokenizer, sample_rate, device):
     print(f"{ColorText.BOLD}[TTS+Blendshapes]{ColorText.END} Converting text to speech and generating blendshapes...")
     
     try:
+        # Initialize audio and blendshape collection
         all_audio_chunks = []
         all_blendshapes = []
         
@@ -351,6 +402,10 @@ def tts_blendshape_worker(model, tokenizer, sample_rate, device):
                 blendshapes_list = blendshapes.tolist() if isinstance(blendshapes, np.ndarray) else blendshapes
                 all_blendshapes.extend(blendshapes_list)
                 
+                # Create a BlendshapeSequence for this chunk
+                fps = 60  # Standard animation frame rate
+                chunk_sequence = BlendshapeSequence(fps=fps, sr=sample_rate, frames=blendshapes_list)
+                
                 # Put audio and blendshapes in queue
                 audio_blendshape_queue.put((audio_int16.tobytes(), blendshapes_list, chunk_id))
                 
@@ -366,20 +421,24 @@ def tts_blendshape_worker(model, tokenizer, sample_rate, device):
         # Signal that processing has finished
         audio_blendshape_queue.put((None, None, None))
         
+        # Create final complete BlendshapeSequence
+        fps = 60
+        complete_sequence = BlendshapeSequence(fps=fps, sr=sample_rate, frames=all_blendshapes)
+        
         # Return combined results
         if all_audio_chunks:
             full_audio = np.concatenate(all_audio_chunks)
             full_audio_int16 = (full_audio * 32767).astype(np.int16)
-            return full_audio_int16, all_blendshapes, sample_rate
+            return full_audio_int16, complete_sequence, sample_rate
         else:
-            return None, [], sample_rate
+            return None, BlendshapeSequence(fps=fps, sr=sample_rate, frames=[]), sample_rate
         
     except Exception as e:
         print(f"\n{ColorText.RED}Error in TTS and blendshape generation: {e}{ColorText.END}")
         import traceback
         print(f"{ColorText.RED}Traceback: {traceback.format_exc()}{ColorText.END}")
         audio_blendshape_queue.put((None, None, None))  # Signal any consumers to stop
-        return None, [], sample_rate
+        return None, BlendshapeSequence(fps=60, sr=sample_rate, frames=[]), sample_rate
 
 @app.route('/audio_to_blendshapes', methods=['POST'])
 def audio_to_blendshapes_route():
@@ -405,28 +464,36 @@ def audio_to_blendshapes_route():
         if not audio_bytes:
             return jsonify({"error": "No audio data provided"}), 400
         
+        # Generate blendshapes using the model
         generated_facial_data = generate_facial_data_from_bytes(audio_bytes, blendshape_model, device, config)
         generated_facial_data_list = generated_facial_data.tolist() if isinstance(generated_facial_data, np.ndarray) else generated_facial_data
 
+        # Create a BlendshapeSequence with proper timing information
+        sample_rate = 16000  # Standard sample rate for the model
+        fps = 60  # Standard animation frame rate
+        sequence = BlendshapeSequence(fps=fps, sr=sample_rate, frames=generated_facial_data_list)
+
         # Send the generated blendshapes to the 3D model
         try:
-            # Create temporary audio file to satisfy run_audio_animation requirements
-            temp_audio = BytesIO()
-            wav.write(temp_audio, rate=16000, data=np.zeros(1000, dtype=np.int16))  # Dummy audio
-            temp_audio.seek(0)
-            
             # Stop default animation
             stop_default_animation.set()
             
-            # Run the animation
-            run_audio_animation(temp_audio, generated_facial_data_list, py_face, socket_connection, default_animation_thread)
+            # Use the new Player class to play the animation
+            player = Player(py_face, socket_connection)
+            player.play(audio_bytes, sequence)
             
-            # Restart default animation
-            stop_default_animation.clear()
+            # Default animation will be restarted by the Player
         except Exception as e:
             print(f"Error sending blendshapes to 3D model: {e}")
+            # Ensure default animation is restarted in case of error
+            stop_default_animation.clear()
 
-        return jsonify({'blendshapes': generated_facial_data_list})
+        # Return the results with timing information
+        return jsonify({
+            'sr': sequence.sr,
+            'fps': sequence.fps,
+            'blendshapes': sequence.frames
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -442,6 +509,8 @@ def text_to_blendshapes_route():
         {
             "text": "Full text response",
             "audio": "Base64 encoded audio",
+            "sr": 16000,
+            "fps": 60,
             "blendshapes": [[...blendshape values...], [...], ...]
         }
     """
@@ -461,6 +530,7 @@ def text_to_blendshapes_route():
         
         # Load LLM and TTS models if not already loaded
         models = load_llm_tts_models()
+        sample_rate = models["sample_rate"]
         
         # Start the LLM worker
         llm_thread = threading.Thread(
@@ -498,6 +568,10 @@ def text_to_blendshapes_route():
             if blendshapes:
                 all_blendshapes.extend(blendshapes)
         
+        # Create BlendshapeSequence
+        fps = 60  # Standard animation frame rate
+        sequence = BlendshapeSequence(fps=fps, sr=sample_rate, frames=all_blendshapes)
+        
         # Concatenate audio chunks
         if full_audio_chunks:
             full_audio = b''.join(full_audio_chunks)
@@ -507,19 +581,15 @@ def text_to_blendshapes_route():
                 # Stop default animation
                 stop_default_animation.set()
                 
-                # Convert audio bytes to format needed by run_audio_animation
-                audio_data = np.frombuffer(full_audio, dtype=np.int16)
-                audio_file = BytesIO()
-                wav.write(audio_file, rate=models["sample_rate"], data=audio_data)
-                audio_file.seek(0)
+                # Use the new Player class
+                player = Player(py_face, socket_connection)
+                player.play(full_audio, sequence)
                 
-                # Run the animation
-                run_audio_animation(audio_file, all_blendshapes, py_face, socket_connection, default_animation_thread)
-                
-                # Restart default animation
-                stop_default_animation.clear()
+                # Default animation will be restarted by the Player
             except Exception as e:
                 print(f"Error sending blendshapes to 3D model: {e}")
+                # Ensure default animation is restarted
+                stop_default_animation.clear()
         else:
             full_audio = b''
         
@@ -529,10 +599,12 @@ def text_to_blendshapes_route():
         # Encode binary audio data as base64 for JSON serialization
         encoded_audio = base64.b64encode(full_audio).decode('utf-8')
         
-        # Return the results
+        # Return the results with timing information
         return jsonify({
             "audio": encoded_audio,
-            "blendshapes": all_blendshapes
+            "sr": sequence.sr,
+            "fps": sequence.fps,
+            "blendshapes": sequence.frames
         })
 
     except Exception as e:
@@ -573,6 +645,7 @@ def stream_text_to_blendshapes_route():
             try:
                 print(f"{ColorText.GREEN}[API] Loading models...{ColorText.END}")
                 models = load_llm_tts_models()
+                sample_rate = models["sample_rate"]
                 print(f"{ColorText.GREEN}[API] Models loaded successfully{ColorText.END}")
             except Exception as e:
                 error_msg = f"Failed to load models: {str(e)}"
@@ -602,22 +675,12 @@ def stream_text_to_blendshapes_route():
             print(f"{ColorText.GREEN}[API] Stopping default animation...{ColorText.END}")
             stop_default_animation.set()
             
-            # Collect all chunks for final playback
-            # all_audio_chunks = [] # No longer needed as audio is streamed to client
-            # all_blendshapes = [] # No longer needed as blendshapes are streamed directly
-            
             # For real-time delivery monitoring
-            last_chunk_time = time.time()
-            frame_counter = 0 # To apply blinking based on default animation data
-            frame_duration = 1.0 / 60.0 # Target 60 FPS
+            fps = 60  # Standard animation frame rate
+            frame_duration = 1.0 / fps  # Target 60 FPS
             
             # Stream each chunk as it becomes available
             print(f"{ColorText.GREEN}[API] Starting to process and stream audio/blendshape chunks...{ColorText.END}")
-            
-            # Remove buffering logic for immediate yield
-            # buffer_chunks = [] 
-            # max_buffer_size = 2  
-            # max_buffer_time = 0.5  
             
             # Import base64 for encoding binary data
             import base64
@@ -641,15 +704,19 @@ def stream_text_to_blendshapes_route():
                         break
                     
                     # Log chunk info
-                    current_time = time.time()
-                    # time_since_last = current_time - last_chunk_time # Not relevant without buffer
                     print(f"{ColorText.GREEN}[API] Processing chunk {chunk_id}, audio size: {len(audio_bytes)} bytes, blendshapes: {len(blendshapes_chunk)}{ColorText.END}")
                     
-                    # --- Yield Audio Chunk to Client IMMEDIATELY ---
+                    # Create BlendshapeSequence for this chunk
+                    chunk_sequence = BlendshapeSequence(fps=fps, sr=sample_rate, frames=blendshapes_chunk)
+                    
+                    # --- Yield Audio and Sequence Info Chunk to Client IMMEDIATELY ---
                     encoded_audio = base64.b64encode(audio_bytes).decode('utf-8')
                     response_chunk = {
                         "chunk_id": chunk_id,
                         "audio": encoded_audio,  # Base64 encoded audio
+                        "sr": sample_rate,
+                        "fps": fps,
+                        "blendshapes": blendshapes_chunk
                     }
                     try:
                         # Put raw bytes onto playback queue *before* yielding to client
@@ -666,10 +733,13 @@ def stream_text_to_blendshapes_route():
                         # Apply blinking data to the blendshape chunk
                         apply_blink_to_facial_data(blendshapes_chunk, default_animation_data)
                         
+                        # Calculate samples per frame for accurate timing
+                        samples_per_frame = sample_rate / fps
+                        
                         # Send each frame in the chunk
                         blendshape_send_start_time = time.time()
                         frames_sent_this_chunk = 0
-                        for frame_data in blendshapes_chunk:
+                        for frame_index, frame_data in enumerate(blendshapes_chunk):
                             frame_start_time = time.time()
                             try:
                                 # Set blendshapes in py_face object
@@ -682,12 +752,12 @@ def stream_text_to_blendshapes_route():
                             except Exception as e:
                                 print(f"{ColorText.RED}[API] Error sending blendshape frame: {e}{ColorText.END}")
                             
-                            # Maintain frame rate (approx 60 FPS)
+                            # Sample-accurate timing
                             elapsed_time = time.time() - frame_start_time
-                            sleep_time = frame_duration - elapsed_time
+                            expected_time = frame_index * samples_per_frame / sample_rate
+                            sleep_time = expected_time - elapsed_time
                             if sleep_time > 0:
                                 time.sleep(sleep_time)
-                            frame_counter += 1
                         blendshape_send_duration = time.time() - blendshape_send_start_time
                         print(f"{ColorText.BLUE}[API] Sent {frames_sent_this_chunk} blendshape frames for chunk {chunk_id} in {blendshape_send_duration:.2f}s.{ColorText.END}")
                     # --- End Real-time Blendshape Streaming --- 
@@ -712,7 +782,7 @@ def stream_text_to_blendshapes_route():
             # Need to restart the thread if it was joined/stopped
             global default_animation_thread # Declare as global to modify it
             if not default_animation_thread or not default_animation_thread.is_alive():
-                default_animation_thread = threading.Thread(target=default_animation_loop, args=(py_face,))
+                default_animation_thread = threading.Thread(target=default_animation_loop, args=(py_face, socket_connection))
                 default_animation_thread.daemon = True
                 default_animation_thread.start()
             
@@ -735,7 +805,7 @@ def stream_text_to_blendshapes_route():
             # Make sure default animation is restarted in case of error
             stop_default_animation.clear()
             if not default_animation_thread or not default_animation_thread.is_alive():
-                default_animation_thread = threading.Thread(target=default_animation_loop, args=(py_face,))
+                default_animation_thread = threading.Thread(target=default_animation_loop, args=(py_face, socket_connection))
                 default_animation_thread.daemon = True
                 default_animation_thread.start()
             
@@ -825,7 +895,7 @@ if __name__ == '__main__':
         # TODO: Dynamically determine sample rate after model loading if possible
         
         # --- Start Default Animation --- 
-        default_animation_thread = threading.Thread(target=default_animation_loop, args=(py_face,))
+        default_animation_thread = threading.Thread(target=default_animation_loop, args=(py_face, socket_connection))
         default_animation_thread.daemon = True
         default_animation_thread.start()
         

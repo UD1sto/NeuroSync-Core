@@ -1,7 +1,7 @@
 # utils/local_tts.py
 import requests
 
-from config import LOCAL_TTS_URL
+from utils.config import LOCAL_TTS_URL
 
 def call_local_tts(text, voice=None): 
     """

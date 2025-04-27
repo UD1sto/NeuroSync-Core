@@ -9,6 +9,7 @@ from typing import List
 from livelink.connect.livelink_init import create_socket_connection, FaceBlendShape
 from livelink.animations.default_animation import default_animation_data
 from livelink.animations.blending_anims import blend_in, blend_out  
+from utils.model.blendshape_sequence import BlendshapeSequence
 
 
 def apply_blink_to_facial_data(facial_data: List, default_animation_data: List[List[float]]):
@@ -61,7 +62,7 @@ def pre_encode_facial_data(facial_data: list, py_face, fps: int = 60, smooth: bo
     blend_out(facial_data, fps, py_face, encoded_data, blend_out_frames, default_animation_data)
     return encoded_data
 
-def send_pre_encoded_data_to_unreal(encoded_facial_data: List[bytes], start_event, fps: int, socket_connection=None):
+def send_pre_encoded_data_to_unreal(encoded_facial_data: List[bytes], start_event, fps: int = 60, sr: int = 16000, socket_connection=None):
     try:
         own_socket = False
         if socket_connection is None:
@@ -69,16 +70,16 @@ def send_pre_encoded_data_to_unreal(encoded_facial_data: List[bytes], start_even
             own_socket = True
 
         start_event.wait()  
-        frame_duration = 1 / fps  
+        samples_per_frame = sr / fps
         start_time = time.time()  
 
         for frame_index, frame_data in enumerate(encoded_facial_data):
             current_time = time.time()
             elapsed_time = current_time - start_time
-            expected_time = frame_index * frame_duration 
+            expected_time = frame_index * samples_per_frame / sr
             if elapsed_time < expected_time:
                 time.sleep(expected_time - elapsed_time)
-            elif elapsed_time > expected_time + frame_duration:
+            elif elapsed_time > expected_time + (samples_per_frame / sr):
                 continue
 
             socket_connection.sendall(frame_data)  
@@ -88,3 +89,13 @@ def send_pre_encoded_data_to_unreal(encoded_facial_data: List[bytes], start_even
     finally:
         if own_socket:
             socket_connection.close()
+
+def send_sequence_to_unreal(sequence: BlendshapeSequence, py_face, start_event, socket_connection=None):
+    """
+    New function to send a BlendshapeSequence to Unreal engine using sample-accurate timing.
+    """
+    # Pre-encode the facial data
+    encoded_data = pre_encode_facial_data(sequence.frames, py_face, sequence.fps)
+    
+    # Send with sample-accurate timing
+    send_pre_encoded_data_to_unreal(encoded_data, start_event, sequence.fps, sequence.sr, socket_connection)

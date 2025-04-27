@@ -13,3 +13,14 @@ librosa>=0.10.0
 timecode>=1.0.6
 pydub>=0.25.1
 accelerate>=0.20.0
+bitsandbytes>=0.43.0
+cmake>=3.29.0
+ninja>=1.11.1
+huggingface-hub>=0.24.0
+openai>=1.0.0
+# Additional dependencies for neurosync_client.py
+simpleaudio>=1.0.4
+
+base64io>=1.0.3
+
+fairscale>=0.4.13    

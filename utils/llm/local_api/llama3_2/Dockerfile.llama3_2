@@ -1,0 +1,31 @@
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    build-essential \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY requirements.txt requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy local files
+COPY . .
+
+# Download model if needed (this step is optional if models are already in the volume)
+# The model checkpoint should already be in ckpts/3b_instruct directory 
+# and tokenizer model should already be present
+
+# Expose API port
+EXPOSE 5050
+
+# Set command to run API
+CMD ["python", "llama_3_2_api.py"] 

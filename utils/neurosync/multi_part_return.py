@@ -3,7 +3,15 @@
 # Businesses or organizations with **annual revenue of $1,000,000 or more** must obtain permission to use this software commercially.
 import json
 import requests
-from config import TTS_WITH_BLENDSHAPES_REALTIME_API 
+import os
+import base64
+from typing import Tuple, List, Optional
+
+# Try to import from config, but provide fallback if not available
+try:
+    from config import TTS_WITH_BLENDSHAPES_REALTIME_API
+except ImportError:
+    TTS_WITH_BLENDSHAPES_REALTIME_API = os.getenv("NEUROSYNC_TTS_URL", "http://127.0.0.1:5000/text_to_blendshapes")
 
 def parse_multipart_response(response):
     """
@@ -53,17 +61,22 @@ def parse_multipart_response(response):
 
 def get_tts_with_blendshapes(text, voice=None):
     """
-    Calls the new TTS endpoint with the given text and optional voice.
+    Calls the TTS endpoint with the given text and optional voice.
     Returns a tuple: (audio_bytes, blendshapes) if successful, else (None, None).
     """
-    payload = {"text": text}
+    # Use the environment variable if available, otherwise use the config value
+    endpoint = os.getenv("NEUROSYNC_TTS_URL", TTS_WITH_BLENDSHAPES_REALTIME_API)
+    
+    # Adjust payload format based on the API requirements
+    # neurosync_local_api.py expects "prompt" key for /text_to_blendshapes endpoint
+    payload = {"prompt": text}
     if voice is not None:
         payload["voice"] = voice
 
     try:
-        response = requests.post(TTS_WITH_BLENDSHAPES_REALTIME_API , json=payload)
+        response = requests.post(endpoint, json=payload)
         response.raise_for_status()
         return parse_multipart_response(response)
     except Exception as e:
-        print(f"❌ Error calling new TTS endpoint: {e}")
-        return None, None
+        print(f"❌ Error calling TTS endpoint: {e}")
+        return b"", []  # Return empty bytes and list instead of None, None
