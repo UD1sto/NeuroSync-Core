@@ -131,5 +131,19 @@ CSV schema: first two columns are `Timecode`, `BlendshapeCount` then 61 blendsha
 4. **Pre-encode** emotion sequences using `pre_encode_facial_data` so Player can send them directly without per-frame encode at runtime.
 5. **Emotion routing**: expose config to enable/disable automatic overlay; could be off for performance-critical demos.
 
+### 9. System-1 / System-2 bridge (new)
+System-1 = fast, reactive chain (current repo).  System-2 = optional, slower reasoning service.
+Communication is a simple shared text/JSON file (env `BRIDGE_FILE_PATH`).
+Flags in config:
+* `ENABLE_SYSTEM2_BRIDGE` – turn feature on/off.
+* `MOCK_SYSTEM2` – if true, background thread appends mock insights every 10 s.
+* `BRIDGE_DEBUG` – verbose logging when bridge contents change.
+
+Injection points:
+* neurosync_client → prepends bridge text to every LLM prompt.
+* neurosync_local_api → same inside `llm_streaming_worker`.
+
+When OFF, runtime identical to pre-bridge behaviour.
+
 ---
-_Last updated by AI assistant – 2025-04-27_
+_Last updated by AI assistant – 2025-04-27 (bridge section)_
