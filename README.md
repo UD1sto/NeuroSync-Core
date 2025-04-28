@@ -1,29 +1,29 @@
-# NeuroSync Local API
+# NeuroSync-Core
 
 > **Note:** This is an extended fork of the original NeuroSync Player + NeuroSync Local API which can be found at [https://github.com/AnimaVR](https://github.com/AnimaVR). All code in this repository falls under the original NeuroSync license.
 
-A Flask-based API to generate blendshapes for 3D facial animation from text or audio input.
+A platform for generating 3D facial animation blendshapes from text or audio input, featuring a modular architecture for flexible integration with various LLM and TTS providers.
 
 ## Features
 
-- Convert text to speech with LLM augmentation
+- Modular integration with different LLM providers (OpenAI, Local Llama 3.1/3.2)
+- Modular integration with different TTS providers (ElevenLabs, Local TTS, NeuroSync combined service)
 - Generate facial blendshapes from audio
 - Stream text-to-speech and blendshape generation
-- Direct animation of 3D face models via LiveLink connection
+- Direct animation of 3D face models via LiveLink connection (requires NeuroSync Player)
 
 ## Installation
 
 NeuroSync-Core supports a wide range of hardware configurations, from CPU-only setups to the latest NVIDIA GPUs.
 
-### Automatic Installation (Recommended)
-
-The easiest way to install NeuroSync-Core is to use our automatic installation script:
-
+### 1. Clone the Repository
 ```bash
-# Clone the repository
 git clone https://github.com/yourusername/NeuroSync-Core.git
 cd NeuroSync-Core
+```
 
+### 2. Create Environment & Install Dependencies
+```bash
 # Create and activate a virtual environment (recommended)
 python -m venv venv
 # On Windows:
@@ -31,21 +31,20 @@ venv\Scripts\activate
 # On macOS/Linux:
 source venv/bin/activate
 
-# Run the installation script
-python install.py
+# Install dependencies
+pip install -r requirements.txt
+
+# Optional: Run the automatic hardware detection and PyTorch installation script
+# This is useful if you haven't installed PyTorch with the correct CUDA support yet.
+# python install.py
 ```
+The `install.py` script can help ensure the correct PyTorch version is installed for your hardware, but installing via `requirements.txt` is the standard method.
 
-The installation script will:
-1. Detect your hardware configuration
-2. Install the appropriate version of PyTorch based on your GPU/CUDA capabilities
-3. Install all other required dependencies
-4. Verify the installation
+### Manual Installation Steps (Alternative)
 
-### Manual Installation
+If you prefer to install manually or encounter issues:
 
-If you prefer to install manually or encounter issues with the automatic installation:
-
-#### 1. Install PyTorch with CUDA support
+#### a. Install PyTorch with CUDA support
 
 Choose the appropriate command based on your CUDA version (check with `nvidia-smi`):
 
@@ -70,102 +69,34 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 pip install torch torchvision
 ```
 
-#### 2. Install other dependencies
+#### b. Install other dependencies
 
 ```bash
-pip install numpy scipy flask pydub sounddevice transformers librosa
+# Install all other requirements
+pip install -r requirements.txt
 ```
 
-## API Endpoints
+## Core Functionality
 
-### `/text_to_blendshapes` (POST)
+NeuroSync-Core provides the underlying services for:
+- Text processing via selected LLM.
+- Speech synthesis via selected TTS.
+- Audio-to-blendshape generation using the NeuroSync model.
+- Sending blendshape data over LiveLink.
 
-Unified endpoint that converts text to speech via LLM, generates blendshapes, and automatically sends the animation to the connected 3D model via LiveLink.
+Specific API endpoints for direct interaction are under development. The primary way to use the system currently is via the client application.
 
-Request:
-```json
-{
-    "prompt": "Text to convert to speech and generate blendshapes"
-}
-```
+## Testing
 
-Response:
-```json
-{
-    "audio": "binary audio data",
-    "blendshapes": [[...blendshape values...], [...], ...]
-}
-```
+Use the provided client application for testing the end-to-end workflow.
 
-**Note:** This endpoint now automatically sends the generated blendshapes to the 3D model through LiveLink, so you can see the animation in real-time without additional steps.
+## Running the Core Services
 
-### `/audio_to_blendshapes` (POST)
-
-Generate blendshapes from audio and automatically send them to the connected 3D model.
-
-Request: Raw audio bytes (WAV format)
-
-Response:
-```json
-{
-    "blendshapes": [[...blendshape values...], [...], ...]
-}
-```
-
-### `/stream_text_to_blendshapes` (POST)
-
-Stream the conversion of text to speech and blendshapes. Sends the animation to the 3D model in real-time as chunks are processed.
-
-Request:
-```json
-{
-    "prompt": "Text to convert to speech and generate blendshapes"
-}
-```
-
-Response: Stream of JSON chunks with audio and blendshapes
-
-## Testing from PowerShell
-
-1. Text-to-blendshapes:
-```powershell
-$body = @{
-    prompt = "Hello, this is a test of the 3D animation system."
-} | ConvertTo-Json
-
-Invoke-RestMethod -Uri "http://127.0.0.1:5000/text_to_blendshapes" -Method Post -Body $body -ContentType "application/json"
-```
-
-2. Audio-to-blendshapes:
-```powershell
-$audioBytes = [System.IO.File]::ReadAllBytes("C:\path\to\sample.wav")
-Invoke-RestMethod -Uri "http://127.0.0.1:5000/audio_to_blendshapes" -Method Post -Body $audioBytes -ContentType "audio/wav"
-```
-
-## Unified Processing Workflow
-
-The NeuroSync Local API now features a streamlined processing pipeline:
-
-1. **Text Input** → When you send text to the `/text_to_blendshapes` endpoint, the system:
-   - Processes your text through a language model (LLM)
-   - Converts the processed text to natural speech
-   - Generates facial blendshapes from the audio
-   - Automatically sends the animation to your 3D model via LiveLink
-
-2. **Real-time Animation** → All endpoints now automatically animate the connected 3D model:
-   - No additional steps required to visualize the animation
-   - Works with Unreal Engine through the NeuroSync Player and LiveLink
-   - Provides smooth, natural facial movements directly from text or audio input
-
-This unified workflow makes it easier than ever to create expressive 3D character animations from simple text prompts or audio files.
-
-## Running the API
-
+To start the backend NeuroSync API service (required for `neurosync` TTS provider and potentially other future local processing):
 ```bash
-python neurosync_local_api.py
+python -m neurosync.server.app
 ```
-
-This will start the local API server on http://127.0.0.1:5000
+This service typically runs on http://127.0.0.1:5000 and is needed if you select `neurosync` as the `TTS_PROVIDER` in your `.env` or command-line arguments. For cloud providers like OpenAI and ElevenLabs, running this specific server is not strictly necessary unless you use the `neurosync` TTS option.
 
 ## 29/03/2025 Update to model.pth and model.py
 
@@ -178,175 +109,112 @@ This will start the local API server on http://127.0.0.1:5000
 
 These increases in quality come from better data and removal of "global" positional encoding from the model and staying with ropes positional encoding within the MHA block.
 
-## Overview
+## Step-by-Step Guide (OpenAI + ElevenLabs)
 
-The **NeuroSync Local API** allows you to host the audio-to-face blendshape transformer model locally. This API processes audio data and outputs facial blendshape coefficients, which can be streamed directly to Unreal Engine using the **NeuroSync Player** and LiveLink.
+This guide walks through the most common setup using cloud services for LLM and TTS, sending animations to the NeuroSync Player.
 
-### Features:
-- Host the model locally for full control
-- Process audio files and generate facial blendshapes
+**Prerequisites:**
+- Installation completed (see "Installation" section).
+- **NeuroSync Player running:** You *must* have the NeuroSync Player application (.exe) open and running for the facial animations (blendshapes) to be received and displayed on your character.
 
-## NeuroSync Model
+**Steps:**
 
-To generate the blendshapes, you can:
+1.  **Configure API Keys in `.env`**: 
+    *   Copy `example.env` to `.env` if you haven't already.
+        ```bash
+        # Use 'copy' on Windows
+        copy example.env .env
+        # Use 'cp' on macOS/Linux
+        # cp example.env .env
+        ```
+    *   Edit the `.env` file and fill in *at least* the following:
+        ```dotenv
+        OPENAI_API_KEY=your_openai_api_key_here
+        ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+        ELEVENLABS_VOICE_ID=your_elevenlabs_voice_id_here # Find this using the utility script below
+        
+        # Ensure providers are set for this guide
+        LLM_PROVIDER=openai
+        TTS_PROVIDER=elevenlabs
+        ```
+    *   *(Optional)* To find your ElevenLabs Voice ID, run the following command after adding your `ELEVENLABS_API_KEY` to `.env`:
+        ```bash
+        python -m neurosync.utils.tts.getVoicesElevenLabs
+        ```
+        Copy the desired ID into your `.env` file.
 
-- [Download the model from Hugging Face](https://huggingface.co/AnimaVR/NEUROSYNC_Audio_To_Face_Blendshape)
+2.  **Ensure NeuroSync Player is Running**: Double-check that the NeuroSync Player application is open.
 
-## Player Requirement
+3.  **(Optional) Start NeuroSync Server**: If you intend to use the `neurosync` TTS provider *instead* of ElevenLabs, you need to start the local server. For *this* guide (using ElevenLabs), this step is **not** required.
+    ```bash
+    # Only needed if TTS_PROVIDER=neurosync
+    # python -m neurosync.server.app 
+    ```
 
-To stream the generated blendshapes into Unreal Engine, you will need the **NeuroSync Player**. The Player allows for real-time integration with Unreal Engine via LiveLink. 
+4.  **Run the Client Application**: Open your terminal or command prompt, navigate to the `NeuroSync-Core` directory, and run:
+    ```bash
+    python -m neurosync.cli.client
+    ```
+    *(Note: Since `LLM_PROVIDER` and `TTS_PROVIDER` are set to `openai` and `elevenlabs` in the `.env` file, you don't need to specify them with `--llm` or `--tts` here, but you could override the `.env` settings if desired.)*
 
-You can find the NeuroSync Player and instructions on setting it up here:
+5.  **Send Text via Client**: The client will prompt you to enter text. Type a sentence and press Enter.
+    ```
+Enter text to process (or type 'quit' to exit):
+> Hello world!
+    ```
 
-- [NeuroSync Player GitHub Repository](https://github.com/AnimaVR/NeuroSync_Player)
+6.  **Observe Animation**: You should hear the audio synthesized by ElevenLabs, and simultaneously see the facial animation on your character in the NeuroSync Player.
 
-Visit [neurosync.info](https://neurosync.info)
-
-## Talk to a NeuroSync prototype live on Twitch : [Visit Mai](https://www.twitch.tv/mai_anima_ai)
-
-## Troubleshooting
-
-### CUDA Issues
-
-If you encounter CUDA-related issues:
-
-1. Verify your CUDA installation with `nvidia-smi`
-2. Check if PyTorch can detect CUDA:
-   ```python
-   python -c "import torch; print(torch.cuda.is_available())"
-   ```
-3. Make sure your GPU drivers are up to date
-4. Try installing a different CUDA version of PyTorch
-
-For detailed diagnostics, run:
-```bash
-python cuda_check.py
-```
-
-## Hardware Requirements
-
-- **CPU-only**: Any modern CPU (slower performance)
-- **GPU (recommended)**: NVIDIA GPU with CUDA support
-- **Memory**: At least 8GB RAM (16GB+ recommended)
-- **Storage**: 5GB+ free space for models and application
-
-# NeuroSync-Core
-
-NeuroSync-Core is a platform for synchronizing text and speech with facial animations.
-
-## New Architecture
-
-NeuroSync now supports a flexible microservices architecture that allows you to:
-
-1. Use different LLM providers:
-   - OpenAI API
-   - Local Llama 3.1 (8B model)
-   - Local Llama 3.2 (3B instruct model)
-
-2. Use different TTS providers:
-   - ElevenLabs API
-   - Local TTS service
-   - Combined Neurosync TTS+Blendshapes service
-
-## Quick Start with OpenAI and ElevenLabs
-
-For the easiest setup with cloud providers:
-
-1. **Install dependencies**:
-   ```bash
-   # Option 1: Using the installation script (recommended)
-   python install.py
-
-   # Option 2: Manual installation
-   pip install -r requirements.txt
-   ```
-
-2. **Configure API keys**:
-   - Copy example.env to .env:
-     ```bash
-     cp example.env .env
-     ```
-   - Edit .env and add your API keys:
-     ```
-     OPENAI_API_KEY=your_openai_api_key_here
-     ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
-     ELEVENLABS_VOICE_ID=your_voice_id_here
-     ```
-   - To find your ElevenLabs voice ID:
-     ```bash
-     # First edit the API key in this file
-     python utils/tts/getVoicesElevenLabs.py
-     ```
-
-3. **Run the client**:
-   ```bash
-   python neurosync_client.py --llm openai --tts elevenlabs
-   ```
-
-That's it! You'll now have:
-- Text generation via OpenAI
-- Voice synthesis via ElevenLabs
-- Facial animation via NeuroSync's blendshape system
-
-## Setup
-
-1. Clone this repository:
-   ```
-   git clone https://github.com/yourusername/NeuroSync-Core.git
-   cd NeuroSync-Core
-   ```
-
-2. Create a `.env` file from the example:
-   ```
-   cp example.env .env
-   ```
-
-3. Edit the `.env` file and set your API keys and configuration preferences.
+That's it! You have successfully processed text through OpenAI, generated speech with ElevenLabs, and animated a character via NeuroSync Core and the NeuroSync Player.
 
 ## Running with Docker Compose
 
-The easiest way to run NeuroSync is with Docker Compose:
+The easiest way to run NeuroSync with all its potential local services (like Llama APIs) is with Docker Compose:
 
 ```bash
 docker-compose up -d
 ```
 
-This will start:
-- NeuroSync API on port 5000
-- Llama 3.2 API on port 5050 (if configured to use local LLM)
-
 ## Running the Client
 
-To run the sample client:
+To run the sample command-line client:
 
 ```bash
-python neurosync_client.py
+python -m neurosync.cli.client
 ```
 
-You can specify LLM and TTS providers on the command line:
+You can specify LLM and TTS providers on the command line, overriding `.env` settings if needed:
 
 ```bash
-python neurosync_client.py --llm openai --tts elevenlabs
+python -m neurosync.cli.client --llm openai --tts elevenlabs
 ```
 
 Available options:
 - `--llm`: `openai`, `llama3_1`, or `llama3_2`
 - `--tts`: `elevenlabs`, `local`, or `neurosync`
-- `--no-animation`: Disable animation features
+- `--no-animation`: Disable sending animation data via LiveLink
 
 ## Configuration
 
 The system can be configured through environment variables. Key settings include:
 
 ### LLM Configuration
-- `LLM_PROVIDER`: Which LLM provider to use (`openai`, `llama3_1`, or `llama3_2`)
-- `OPENAI_API_KEY`: Your OpenAI API key (if using OpenAI)
-- `LLAMA_3_1_ENDPOINT`/`LLAMA_3_2_ENDPOINT`: Endpoints for local Llama models
+- `LLM_PROVIDER`: Which LLM provider to use (`openai`, `llama3_1`, or `llama3_2`). Default: `openai`.
+  **Note:** Local LLM options (`llama3_1`, `llama3_2`) are included but have not been fully tested with the latest refactoring as of this update.
+- `OPENAI_API_KEY`: Your OpenAI API key (if using OpenAI).
+- `LLAMA_3_1_ENDPOINT`/`LLAMA_3_2_ENDPOINT`: Endpoints for local Llama models (e.g., `http://localhost:5050/v1`).
 
 ### TTS Configuration
-- `TTS_PROVIDER`: Which TTS provider to use (`elevenlabs`, `local`, or `neurosync`)
-- `ELEVENLABS_API_KEY`: Your ElevenLabs API key (if using ElevenLabs)
-- `ELEVENLABS_VOICE_ID`: Voice ID to use with ElevenLabs
+- `TTS_PROVIDER`: Which TTS provider to use (`elevenlabs`, `local`, or `neurosync`). Default: `elevenlabs`.
+- `ELEVENLABS_API_KEY`: Your ElevenLabs API key (if using ElevenLabs).
+- `ELEVENLABS_VOICE_ID`: Voice ID to use with ElevenLabs.
+- `LOCAL_TTS_ENDPOINT`: Endpoint for the local TTS service (if using `local`).
+- `NEUROSYNC_API_ENDPOINT`: Endpoint for the combined NeuroSync TTS+Blendshapes service (if using `neurosync`). Default: `http://127.0.0.1:5000`.
+
+### Other Configuration
+- `LIVELINK_TARGET_IP`: IP address for LiveLink connection. Default: `127.0.0.1`.
+- `LIVELINK_TARGET_PORT`: Port for LiveLink connection. Default: `11111`.
+- `LIVELINK_SUBJECT_NAME`: Subject name for LiveLink. Default: `NeuroSyncSubject`.
 
 See `example.env` for all available configuration options.
 
