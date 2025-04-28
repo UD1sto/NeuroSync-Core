@@ -56,3 +56,5 @@ temp/
 .cache/
 .pytest_cache/
 .coverage 
+
+bridge.txt

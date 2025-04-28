@@ -229,3 +229,129 @@ python cuda_check.py
 - **GPU (recommended)**: NVIDIA GPU with CUDA support
 - **Memory**: At least 8GB RAM (16GB+ recommended)
 - **Storage**: 5GB+ free space for models and application
+
+# NeuroSync-Core
+
+NeuroSync-Core is a platform for synchronizing text and speech with facial animations.
+
+## New Architecture
+
+NeuroSync now supports a flexible microservices architecture that allows you to:
+
+1. Use different LLM providers:
+   - OpenAI API
+   - Local Llama 3.1 (8B model)
+   - Local Llama 3.2 (3B instruct model)
+
+2. Use different TTS providers:
+   - ElevenLabs API
+   - Local TTS service
+   - Combined Neurosync TTS+Blendshapes service
+
+## Quick Start with OpenAI and ElevenLabs
+
+For the easiest setup with cloud providers:
+
+1. **Install dependencies**:
+   ```bash
+   # Option 1: Using the installation script (recommended)
+   python install.py
+
+   # Option 2: Manual installation
+   pip install -r requirements.txt
+   ```
+
+2. **Configure API keys**:
+   - Copy example.env to .env:
+     ```bash
+     cp example.env .env
+     ```
+   - Edit .env and add your API keys:
+     ```
+     OPENAI_API_KEY=your_openai_api_key_here
+     ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+     ELEVENLABS_VOICE_ID=your_voice_id_here
+     ```
+   - To find your ElevenLabs voice ID:
+     ```bash
+     # First edit the API key in this file
+     python utils/tts/getVoicesElevenLabs.py
+     ```
+
+3. **Run the client**:
+   ```bash
+   python neurosync_client.py --llm openai --tts elevenlabs
+   ```
+
+That's it! You'll now have:
+- Text generation via OpenAI
+- Voice synthesis via ElevenLabs
+- Facial animation via NeuroSync's blendshape system
+
+## Setup
+
+1. Clone this repository:
+   ```
+   git clone https://github.com/yourusername/NeuroSync-Core.git
+   cd NeuroSync-Core
+   ```
+
+2. Create a `.env` file from the example:
+   ```
+   cp example.env .env
+   ```
+
+3. Edit the `.env` file and set your API keys and configuration preferences.
+
+## Running with Docker Compose
+
+The easiest way to run NeuroSync is with Docker Compose:
+
+```bash
+docker-compose up -d
+```
+
+This will start:
+- NeuroSync API on port 5000
+- Llama 3.2 API on port 5050 (if configured to use local LLM)
+
+## Running the Client
+
+To run the sample client:
+
+```bash
+python neurosync_client.py
+```
+
+You can specify LLM and TTS providers on the command line:
+
+```bash
+python neurosync_client.py --llm openai --tts elevenlabs
+```
+
+Available options:
+- `--llm`: `openai`, `llama3_1`, or `llama3_2`
+- `--tts`: `elevenlabs`, `local`, or `neurosync`
+- `--no-animation`: Disable animation features
+
+## Configuration
+
+The system can be configured through environment variables. Key settings include:
+
+### LLM Configuration
+- `LLM_PROVIDER`: Which LLM provider to use (`openai`, `llama3_1`, or `llama3_2`)
+- `OPENAI_API_KEY`: Your OpenAI API key (if using OpenAI)
+- `LLAMA_3_1_ENDPOINT`/`LLAMA_3_2_ENDPOINT`: Endpoints for local Llama models
+
+### TTS Configuration
+- `TTS_PROVIDER`: Which TTS provider to use (`elevenlabs`, `local`, or `neurosync`)
+- `ELEVENLABS_API_KEY`: Your ElevenLabs API key (if using ElevenLabs)
+- `ELEVENLABS_VOICE_ID`: Voice ID to use with ElevenLabs
+
+See `example.env` for all available configuration options.
+
+## License
+
+This software is licensed under a dual-license model:
+- For individuals and businesses earning under $1M per year, this software is licensed under the MIT License
+- Businesses or organizations with annual revenue of $1,000,000 or more must obtain permission to use this software commercially.
