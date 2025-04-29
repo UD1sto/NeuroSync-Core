@@ -24,3 +24,6 @@ simpleaudio>=1.0.4
 base64io>=1.0.3
 
 fairscale>=0.4.13    
+
+# Add redis dependency
+redis>=4.0.0  # Using a version specifier for stability    
