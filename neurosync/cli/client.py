@@ -273,6 +273,7 @@ def main():
             
             # Process in streaming mode
             text_buffer = []
+            full_reply_text = ""
             print("AI: ", end="", flush=True)
             
             try:
@@ -284,6 +285,7 @@ def main():
                     top_p=0.9
                 ):
                     print(chunk, end="", flush=True)
+                    full_reply_text += chunk
                     
                     # Process chunk for TTS
                     process_llm_chunk(chunk, tts_chunk_queue, text_buffer)
@@ -301,7 +303,7 @@ def main():
             
             # After generation complete, log AI speech to SCB
             try:
-                scb_store.append({"type": "speech", "actor": "vtuber", "text": ''.join(text_buffer)})
+                scb_store.append({"type": "speech", "actor": "vtuber", "text": full_reply_text})
             except Exception as e:
                 print(f"{ColorText.RED}[Client] Failed to log AI speech to SCB: {e}{ColorText.END}")
             
