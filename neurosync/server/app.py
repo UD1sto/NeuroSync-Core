@@ -24,7 +24,7 @@ import scipy.io.wavfile as wav
 import sounddevice as sd # Added for local audio playback
 import torch
 import dotenv
-from flask import Response, jsonify, request, stream_with_context
+from flask import Response, jsonify, request, stream_with_context, Blueprint
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -54,6 +54,8 @@ from neurosync.core.config import config
 from neurosync.core.generate_face_shapes import generate_facial_data_from_bytes
 from neurosync.core.bridge import BridgeCache # Assuming utils is still at the root
 from neurosync.core.color_text import ColorText # Assuming a utility class
+from neurosync.core.scb_store import scb_store
+from neurosync.core.summarizer import SummarizerThread
 
 # Load environment variables
 dotenv.load_dotenv()
@@ -246,107 +248,110 @@ def load_llm_tts_models():
 
     return pipeline_models
 
+# --- Register SCB Blueprint -------------------------------------------------
+scb_bp = Blueprint('scb_api', __name__)
+
+@scb_bp.route('/event', methods=['POST'])
+def scb_event_route():
+    data = request.json or {}
+    if not all(k in data for k in ['type', 'actor', 'text']):
+        return jsonify({'error': 'Fields "type", "actor", "text" required'}), 400
+    scb_store.append(data)
+    return jsonify({'status': 'ok'})
+
+@scb_bp.route('/directive', methods=['POST'])
+def scb_directive_route():
+    data = request.json or {}
+    if not all(k in data for k in ['actor', 'text']):
+        return jsonify({'error': 'Fields "actor", "text" required'}), 400
+    data['type'] = 'directive'
+    if 'ttl' not in data:
+        data['ttl'] = 15
+    scb_store.append(data)
+    return jsonify({'status': 'ok'})
+
+@scb_bp.route('/slice', methods=['GET'])
+def scb_slice_route():
+    try:
+        tokens = int(request.args.get('tokens', '600'))
+    except ValueError:
+        return jsonify({'error': 'tokens must be int'}), 400
+    return jsonify(scb_store.get_slice(token_budget=tokens))
+
+app.register_blueprint(scb_bp, url_prefix='/scb')
+
 # --- Worker Functions ---
 
 def llm_streaming_worker(model, tokenizer, prompt, device):
-    """Worker function that streams text from LLM and sends it to the TTS queue"""
+    """Streams text from LLM, logs to SCB and sends chunks to TTS queue"""
+    # Log user prompt as event
+    scb_store.append_chat(prompt, actor='user')
     print(f"\n{ColorText.BOLD}[LLM]{ColorText.END} Generating response...")
     try:
+        persona = "You are Mai, a witty and helpful VTuber assistant with a dry sense of humor."
+        summary = scb_store.get_summary()
+        recent_chat = scb_store.get_recent_chat(3)
         bridge_txt = BridgeCache.read()
-        full_prompt = f"{bridge_txt}\n{prompt}" if bridge_txt else prompt
-        print(f"{ColorText.BOLD}[LLM]{ColorText.END} Full prompt: {full_prompt[:200]}...") # Log truncated prompt
-
+        prompt_parts = [persona]
+        if bridge_txt:
+            prompt_parts.append(bridge_txt)
+        if summary:
+            prompt_parts.append(f"Current summary:\n{summary}")
+        if recent_chat:
+            prompt_parts.append(f"Recent chat:\n{recent_chat}")
+        prompt_parts.append(f"User: {prompt}\nAI:")
+        full_prompt = "\n\n".join(prompt_parts)
+        print(f"{ColorText.BOLD}[LLM]{ColorText.END} Prompt (trunc): {full_prompt[:300]}...")
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
         inputs = tokenizer(full_prompt, return_tensors="pt").to(device)
-
         generation_kwargs = {
             "input_ids": inputs["input_ids"],
             "attention_mask": inputs["attention_mask"],
-            "max_new_tokens": llm_tts_config.llm_max_length, # Use max_new_tokens
+            "max_new_tokens": llm_tts_config.llm_max_length,
             "temperature": llm_tts_config.llm_temperature,
             "top_p": llm_tts_config.llm_top_p,
             "repetition_penalty": llm_tts_config.llm_repetition_penalty,
             "do_sample": True,
             "streamer": streamer,
-            "pad_token_id": tokenizer.eos_token_id # Explicitly set pad_token_id
+            "pad_token_id": tokenizer.eos_token_id
         }
-
         thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
         thread.start()
-
         full_text = ""
         buffer = ""
-        chunk_count = 0
         natural_breakpoints = [".", "!", "?", ";", ":", ","]
         priority_breakpoints = [".", "!", "?"]
-
+        chunk_id = 0
         for new_text in streamer:
             full_text += new_text
             buffer += new_text
-
-            # --- Chunking Logic ---
-            # Prioritize sentence endings first if buffer is long enough
-            found_priority_bp = False
+            # decide split
+            send = False
             if any(bp in buffer for bp in priority_breakpoints) and buffer.count(" ") >= 3:
-                last_breakpoint_idx = max([buffer.rfind(bp) for bp in priority_breakpoints if bp in buffer], default=-1)
-                if last_breakpoint_idx > 0:
-                    chunk = buffer[:last_breakpoint_idx + 1].strip()
-                    buffer = buffer[last_breakpoint_idx + 1:].strip()
-                    if chunk:
-                        chunk_count += 1
-                        text_queue.put((chunk, chunk_count))
-                        # print(f"{ColorText.CYAN}[LLM Chunk {chunk_count}] Sent (priority): '{chunk}'{ColorText.END}") # Debug
-                        found_priority_bp = True
-
-            # If no priority breakpoint found, check word threshold or other breakpoints
-            if not found_priority_bp:
-                word_threshold_met = buffer.count(" ") >= llm_tts_config.chunk_word_threshold
-                found_secondary_bp = False
-                if any(bp in buffer for bp in natural_breakpoints) and buffer.count(" ") >= 3:
-                     last_breakpoint_idx = max([buffer.rfind(bp) for bp in natural_breakpoints if bp in buffer], default=-1)
-                     if last_breakpoint_idx > 0:
-                        chunk = buffer[:last_breakpoint_idx + 1].strip()
-                        buffer = buffer[last_breakpoint_idx + 1:].strip()
-                        if chunk:
-                            chunk_count += 1
-                            text_queue.put((chunk, chunk_count))
-                            # print(f"{ColorText.CYAN}[LLM Chunk {chunk_count}] Sent (secondary): '{chunk}'{ColorText.END}") # Debug
-                            found_secondary_bp = True
-
-                # Send based on word count if no breakpoint found yet
-                if not found_secondary_bp and word_threshold_met:
-                    # Try to split at the last space to avoid cutting words
-                    last_space_idx = buffer.rfind(" ")
-                    if last_space_idx != -1:
-                        chunk = buffer[:last_space_idx].strip()
-                        buffer = buffer[last_space_idx:].strip()
-                    else: # If no space (very long word), send the whole buffer
-                        chunk = buffer.strip()
-                        buffer = ""
-
-                    if chunk:
-                        chunk_count += 1
-                        text_queue.put((chunk, chunk_count))
-                        # print(f"{ColorText.CYAN}[LLM Chunk {chunk_count}] Sent (word count): '{chunk}'{ColorText.END}") # Debug
-            # --- End Chunking Logic ---
-
-
-        # Send remaining buffer
+                idx = max(buffer.rfind(bp) for bp in priority_breakpoints)
+                send = True
+                cut = buffer[:idx+1].strip()
+                buffer = buffer[idx+1:].strip()
+            elif buffer.count(" ") >= llm_tts_config.chunk_word_threshold:
+                idx = buffer.rfind(" ")
+                cut = buffer[:idx].strip() if idx != -1 else buffer.strip()
+                buffer = buffer[idx:].strip() if idx != -1 else ""
+                send = True
+            if send and cut:
+                chunk_id += 1
+                text_queue.put((cut, chunk_id))
         if buffer.strip():
-            chunk_count += 1
-            text_queue.put((buffer.strip(), chunk_count))
-            # print(f"{ColorText.CYAN}[LLM Chunk {chunk_count}] Sent (final): '{buffer.strip()}'{ColorText.END}") # Debug
-
-        text_queue.put((None, None)) # Signal end
-        thread.join() # Ensure generation thread finishes
-        print(f"{ColorText.BOLD}[LLM]{ColorText.END} Finished generation. Total chunks: {chunk_count}")
+            chunk_id += 1
+            text_queue.put((buffer.strip(), chunk_id))
+        text_queue.put((None, None))
+        thread.join()
+        # Log AI speech
+        scb_store.append({"type": "speech", "actor": "vtuber", "text": full_text})
         return full_text
-
     except Exception as e:
         print(f"\n{ColorText.RED}[ERROR] Error in LLM streaming: {e}{ColorText.END}")
-        import traceback
-        print(f"{ColorText.RED}Traceback:\n{traceback.format_exc()}{ColorText.END}")
-        text_queue.put((None, None)) # Signal the TTS worker to stop
+        import traceback; print(traceback.format_exc())
+        text_queue.put((None, None))
         return ""
 
 def tts_blendshape_worker(model, tokenizer, sample_rate, device):
@@ -907,6 +912,11 @@ def main():
         )
         playback_thread.start()
 
+        # --- Start Summarizer Thread ---
+        summarizer_stop = threading.Event()
+        summarizer_thread = SummarizerThread(stop_event=summarizer_stop)
+        summarizer_thread.start()
+
         # --- Run Flask App ---
         host = os.getenv("FLASK_HOST", '127.0.0.1')
         port = int(os.getenv("FLASK_PORT", 5000))
@@ -956,6 +966,11 @@ def main():
                 print(f"{ColorText.GREEN}Socket connection closed.{ColorText.END}")
              except Exception as e:
                 print(f"{ColorText.RED}Error closing socket connection: {e}{ColorText.END}")
+
+        # Stop summarizer
+        summarizer_stop.set()
+        if summarizer_thread.is_alive():
+            summarizer_thread.join(timeout=3)
 
         print(f"{ColorText.YELLOW}[Main] Shutdown complete.{ColorText.END}")
 

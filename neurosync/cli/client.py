@@ -24,6 +24,8 @@ dotenv.load_dotenv()
 from ..llm.llm_service import LLMService, LLMProvider
 from ..tts.tts_service import TTSService, TTSProvider
 from ..core.bridge import BridgeCache
+from ..core.scb_store import scb_store
+from neurosync.core.color_text import ColorText
 
 # Optional: import for animation if we want to use it
 animation_available = False
@@ -245,12 +247,29 @@ def main():
                 
             print("\nGenerating response...\n")
             
-            # Format message for LLM (include optional System-2 bridge context)
-            messages = []
+            # Build system prompt from SCB summary and persona
+            persona = "You are Mai, a witty and helpful VTuber assistant with a dry sense of humor."
+            summary = scb_store.get_summary()
+            recent_chat = scb_store.get_recent_chat(3)
             bridge_txt = BridgeCache.read()
+
+            system_parts = [persona]
             if bridge_txt:
-                messages.append({"role": "system", "content": bridge_txt})
-            messages.append({"role": "user", "content": user_input})
+                system_parts.append(bridge_txt)
+            if summary:
+                system_parts.append(f"Current summary:\n{summary}")
+            if recent_chat:
+                system_parts.append(f"Recent chat:\n{recent_chat}")
+
+            system_msg = "\n\n".join(system_parts)
+
+            messages = [{"role": "system", "content": system_msg}, {"role": "user", "content": user_input}]
+            
+            # Log user prompt to SCB
+            try:
+                scb_store.append_chat(user_input, actor="user")
+            except Exception as e:
+                print(f"{ColorText.RED}[Client] Failed to log user input to SCB: {e}{ColorText.END}")
             
             # Process in streaming mode
             text_buffer = []
@@ -279,6 +298,12 @@ def main():
                     tts_chunk_queue.put(final_text)
                     
             print("\n")  # Add some space after the response
+            
+            # After generation complete, log AI speech to SCB
+            try:
+                scb_store.append({"type": "speech", "actor": "vtuber", "text": ''.join(text_buffer)})
+            except Exception as e:
+                print(f"{ColorText.RED}[Client] Failed to log AI speech to SCB: {e}{ColorText.END}")
             
     except KeyboardInterrupt:
         print("\nExiting...")
