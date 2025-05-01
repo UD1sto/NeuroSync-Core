@@ -11,7 +11,7 @@ import time
 import sys
 
 # Configuration
-UDP_IP = os.getenv('LIVELINK_UDP_IP', '127.0.0.1')
+UDP_IP = os.getenv('LIVELINK_UDP_IP', 'host.docker.internal')
 UDP_PORT = 11111
 
 def create_socket_connection():

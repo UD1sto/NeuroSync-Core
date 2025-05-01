@@ -32,6 +32,7 @@ from transformers import (
     VitsModel,
     utils as hf_utils
 )
+from flask_cors import CORS  # NEW: CORS support
 
 # Add the project root to sys.path to allow absolute imports
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -251,6 +252,21 @@ def load_llm_tts_models():
 # --- Register SCB Blueprint -------------------------------------------------
 scb_bp = Blueprint('scb_api', __name__)
 
+# --- Security & Debug for SCB API -------------------------------------------
+API_KEY = os.getenv("NEUROSYNC_API_KEY", "")
+SCB_API_DEBUG = os.getenv("SCB_API_DEBUG", "false").lower() == "true"
+
+@scb_bp.before_request
+def _scb_auth_and_log():
+    if SCB_API_DEBUG:
+        print(f"{ColorText.YELLOW}[SCB API]{ColorText.END} {request.method} {request.path} from {request.remote_addr}")
+    if API_KEY:
+        provided = request.headers.get("X-NeuroSync-Key", "")
+        if provided != API_KEY:
+            if SCB_API_DEBUG:
+                print(f"{ColorText.RED}[SCB API] Unauthorized request – invalid key{ColorText.END}")
+            return jsonify({"error": "unauthorized"}), 401
+
 @scb_bp.route('/event', methods=['POST'])
 def scb_event_route():
     data = request.json or {}
@@ -278,7 +294,15 @@ def scb_slice_route():
         return jsonify({'error': 'tokens must be int'}), 400
     return jsonify(scb_store.get_slice(token_budget=tokens))
 
+@scb_bp.route('/ping', methods=['GET'])  # NEW health-check endpoint
+def scb_ping_route():
+    return jsonify({'status': 'ok'})
+
 app.register_blueprint(scb_bp, url_prefix='/scb')
+
+# --- NEW CORS CONFIG ---------------------------------------------------------
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "*")
+CORS(app, resources={r"/scb/*": {"origins": allowed_origins}})
 
 # --- Worker Functions ---
 
