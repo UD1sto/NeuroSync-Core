@@ -282,6 +282,15 @@ class SCBStore:
 
         return slice_data
 
+    def get_full(self) -> dict:
+        """Returns the entire SCB whiteboard (summary + full log window)."""
+        summary = self.get_summary()
+        # Retrieve up to max_lines entries (newest first)
+        entries = self.get_log_entries(self.max_lines)
+        # Reverse to chronological order (oldest first)
+        window = list(reversed(entries))
+        return {"summary": summary, "window": window}
+
 
 # --- Singleton Instance ---
 # Instantiate the store so it can be imported and used directly
@@ -345,5 +354,9 @@ if __name__ == "__main__":
     print("\nGetting Slice (budget 10 words):")
     slice_data_small = store.get_slice(token_budget=10)
     print(json.dumps(slice_data_small, indent=2))
+
+    print("\nGetting Full SCB:")
+    full_scb = store.get_full()
+    print(json.dumps(full_scb, indent=2))
 
     print("\n--- Test Complete --- ") 

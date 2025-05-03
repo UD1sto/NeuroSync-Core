@@ -259,7 +259,17 @@ SCB_API_DEBUG = os.getenv("SCB_API_DEBUG", "false").lower() == "true"
 @scb_bp.before_request
 def _scb_auth_and_log():
     if SCB_API_DEBUG:
-        print(f"{ColorText.YELLOW}[SCB API]{ColorText.END} {request.method} {request.path} from {request.remote_addr}")
+        log_prefix = f"{ColorText.YELLOW}[SCB API]{ColorText.END}"
+        log_message = f"{request.method} {request.path} from {request.remote_addr}"
+        if request.method in ['POST', 'PUT'] and request.data:
+            try:
+                # Attempt to parse JSON for pretty printing, fallback to raw bytes
+                request_body = request.get_json() if request.is_json else request.get_data(as_text=True)
+                log_message += f"\\n  Request Body: {request_body}"
+            except Exception:
+                log_message += f"\\n  Request Body (raw): {request.data[:200]}{'...' if len(request.data) > 200 else ''}" # Log first 200 bytes
+        print(f"{log_prefix} {log_message}")
+
     if API_KEY:
         provided = request.headers.get("X-NeuroSync-Key", "")
         if provided != API_KEY:
@@ -284,19 +294,30 @@ def scb_directive_route():
     if 'ttl' not in data:
         data['ttl'] = 15
     scb_store.append(data)
-    return jsonify({'status': 'ok'})
+    response_data = {'status': 'ok'}
+    if SCB_API_DEBUG:
+        print(f"{ColorText.YELLOW}[SCB API]{ColorText.END} Response for POST /scb/directive: {response_data}")
+    return jsonify(response_data)
 
 @scb_bp.route('/slice', methods=['GET'])
 def scb_slice_route():
-    try:
-        tokens = int(request.args.get('tokens', '600'))
-    except ValueError:
-        return jsonify({'error': 'tokens must be int'}), 400
-    return jsonify(scb_store.get_slice(token_budget=tokens))
+    # Return the full SCB whiteboard (summary + full window).
+    # The previous token-budgeted behaviour is now deprecated. We keep the
+    #   optional `tokens` query param for backward-compatibility but ignore it.
+    response_data = scb_store.get_full()
+    if SCB_API_DEBUG:
+        # Log summary and window size for brevity
+        summary = response_data.get('summary', '')
+        window_size = len(response_data.get('window', []))
+        print(f"{ColorText.YELLOW}[SCB API]{ColorText.END} Response for GET /scb/slice: Summary Length={len(summary)}, Window Entries={window_size}")
+    return jsonify(response_data)
 
 @scb_bp.route('/ping', methods=['GET'])  # NEW health-check endpoint
 def scb_ping_route():
-    return jsonify({'status': 'ok'})
+    response_data = {'status': 'ok'}
+    if SCB_API_DEBUG:
+        print(f"{ColorText.YELLOW}[SCB API]{ColorText.END} Response for GET /scb/ping: {response_data}")
+    return jsonify(response_data)
 
 app.register_blueprint(scb_bp, url_prefix='/scb')
 
