@@ -47,6 +47,24 @@ audio_start   = None       # <-- new global
 audio_sr      = 16000      # will be updated by the first chunk
 audio_start_lck = threading.Lock()
 
+# Add after imports
+# --- SCB Remote Configuration ---
+SCB_API_BASE_URL = os.getenv("SCB_API_BASE_URL") or os.getenv("NEUROSYNC_URL", "http://127.0.0.1:5000") + "/scb"
+SCB_API_KEY = os.getenv("NEUROSYNC_API_KEY", "")
+
+def scb_remote_append(entry: dict):
+    """Send an SCB entry to the remote NeuroSync server if configured."""
+    try:
+        headers = {"Content-Type": "application/json"}
+        if SCB_API_KEY:
+            headers["X-NeuroSync-Key"] = SCB_API_KEY
+
+        route = "/directive" if entry.get("type") == "directive" else "/event"
+        url = f"{SCB_API_BASE_URL}{route}"
+        requests.post(url, json=entry, headers=headers, timeout=3)
+    except Exception as e:
+        print(f"[SCB Remote] Failed to send entry to {url}: {e}")
+
 def process_llm_chunk(chunk, tts_chunk_queue, text_buffer, buffer_threshold=10):
     """Process a chunk of text from the LLM and add it to the TTS queue when ready"""
     text_buffer.append(chunk)
@@ -265,9 +283,10 @@ def main():
 
             messages = [{"role": "system", "content": system_msg}, {"role": "user", "content": user_input}]
             
-            # Log user prompt to SCB
+            # Log user prompt to SCB (both local and remote)
             try:
                 scb_store.append_chat(user_input, actor="user")
+                scb_remote_append({"type": "event", "actor": "user", "text": user_input})
             except Exception as e:
                 print(f"{ColorText.RED}[Client] Failed to log user input to SCB: {e}{ColorText.END}")
             
@@ -303,7 +322,9 @@ def main():
             
             # After generation complete, log AI speech to SCB
             try:
-                scb_store.append({"type": "speech", "actor": "vtuber", "text": full_reply_text})
+                speech_entry = {"type": "speech", "actor": "vtuber", "text": full_reply_text}
+                scb_store.append(speech_entry)
+                scb_remote_append(speech_entry)
             except Exception as e:
                 print(f"{ColorText.RED}[Client] Failed to log AI speech to SCB: {e}{ColorText.END}")
             
