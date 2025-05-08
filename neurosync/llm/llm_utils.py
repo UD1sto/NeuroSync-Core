@@ -108,7 +108,12 @@ def local_llm_streaming(user_input, chat_history, chunk_queue, config):
     flush_token_count = config.get("flush_token_count", 10)
 
     # Create the SentenceBuilder and a dedicated token_queue.
-    sentence_builder = SentenceBuilder(chunk_queue, max_chunk_length, flush_token_count)
+    sentence_builder = SentenceBuilder(
+        chunk_queue,
+        max_chunk_length,
+        flush_token_count,
+        respect_sentence_endings=config.get("respect_sentence_endings", False)
+    )
     token_queue = Queue()
     sb_thread = Thread(target=sentence_builder.run, args=(token_queue,))
     sb_thread.daemon = True # Make daemon
@@ -155,7 +160,12 @@ def local_llm_non_streaming(user_input, chat_history, chunk_queue, config):
     flush_token_count = config.get("flush_token_count", 10)
 
     # Set up the SentenceBuilder.
-    sentence_builder = SentenceBuilder(chunk_queue, max_chunk_length, flush_token_count)
+    sentence_builder = SentenceBuilder(
+        chunk_queue,
+        max_chunk_length,
+        flush_token_count,
+        respect_sentence_endings=config.get("respect_sentence_endings", False)
+    )
     token_queue = Queue()
     sb_thread = Thread(target=sentence_builder.run, args=(token_queue,))
     sb_thread.daemon = True # Make daemon
@@ -207,7 +217,12 @@ def openai_llm_streaming(user_input, chat_history, chunk_queue, config):
     flush_token_count = config.get("flush_token_count", 10)
 
     # Set up the SentenceBuilder.
-    sentence_builder = SentenceBuilder(chunk_queue, max_chunk_length, flush_token_count)
+    sentence_builder = SentenceBuilder(
+        chunk_queue,
+        max_chunk_length,
+        flush_token_count,
+        respect_sentence_endings=config.get("respect_sentence_endings", False)
+    )
     token_queue = Queue()
     sb_thread = Thread(target=sentence_builder.run, args=(token_queue,))
     sb_thread.daemon = True # Make daemon
@@ -260,7 +275,12 @@ def openai_llm_non_streaming(user_input, chat_history, chunk_queue, config):
     flush_token_count = config.get("flush_token_count", 10)
 
     # Set up the SentenceBuilder.
-    sentence_builder = SentenceBuilder(chunk_queue, max_chunk_length, flush_token_count)
+    sentence_builder = SentenceBuilder(
+        chunk_queue,
+        max_chunk_length,
+        flush_token_count,
+        respect_sentence_endings=config.get("respect_sentence_endings", False)
+    )
     token_queue = Queue()
     sb_thread = Thread(target=sentence_builder.run, args=(token_queue,))
     sb_thread.daemon = True # Make daemon

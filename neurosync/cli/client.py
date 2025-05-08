@@ -214,7 +214,7 @@ def main():
     parser = argparse.ArgumentParser(description="NeuroSync Client for LLM and TTS")
     parser.add_argument("--llm", choices=["openai", "llama3_1", "llama3_2"], 
                       help="LLM provider to use")
-    parser.add_argument("--tts", choices=["elevenlabs", "local", "neurosync"], 
+    parser.add_argument("--tts", choices=["elevenlabs", "local", "neurosync", "neurosync_stream"], 
                       help="TTS provider to use")
     parser.add_argument("--no-animation", action="store_true", 
                       help="Disable animation even if available")
@@ -246,13 +246,19 @@ def main():
     # Create a queue for TTS chunks
     tts_chunk_queue = queue.Queue()
     
-    # Start TTS worker thread
-    tts_thread = threading.Thread(
-        target=tts_worker, 
-        args=(tts_chunk_queue, tts_service, py_face, socket_connection),
-        daemon=True
-    )
-    tts_thread.start()
+    # Decide execution mode based on TTS provider
+    streaming_mode = tts_service.provider.value == "neurosync_stream"
+
+    if not streaming_mode:
+        # Start classic TTS worker that converts queued text chunks to speech
+        tts_thread = threading.Thread(
+            target=tts_worker, 
+            args=(tts_chunk_queue, tts_service, py_face, socket_connection),
+            daemon=True
+        )
+        tts_thread.start()
+    else:
+        tts_thread = None  # Will launch streaming threads per prompt
     
     print("\nNeuroSync Client initialized. Enter a prompt or 'exit' to quit.")
     
@@ -265,75 +271,115 @@ def main():
                 
             print("\nGenerating response...\n")
             
-            # Build system prompt from SCB summary and persona
-            persona = "You are Mai, a witty and helpful VTuber assistant with a dry sense of humor."
-            summary = scb_store.get_summary()
-            recent_chat = scb_store.get_recent_chat(3)
-            bridge_txt = BridgeCache.read()
+            if not streaming_mode:
+                # ------- Classic LLM + local TTS pipeline --------
 
-            system_parts = [persona]
-            if bridge_txt:
-                system_parts.append(bridge_txt)
-            if summary:
-                system_parts.append(f"Current summary:\n{summary}")
-            if recent_chat:
-                system_parts.append(f"Recent chat:\n{recent_chat}")
+                persona = "You are Mai, a witty and helpful VTuber assistant with a dry sense of humor."
+                summary = scb_store.get_summary()
+                recent_chat = scb_store.get_recent_chat(3)
+                bridge_txt = BridgeCache.read()
 
-            system_msg = "\n\n".join(system_parts)
+                system_parts = [persona]
+                if bridge_txt:
+                    system_parts.append(bridge_txt)
+                if summary:
+                    system_parts.append(f"Current summary:\n{summary}")
+                if recent_chat:
+                    system_parts.append(f"Recent chat:\n{recent_chat}")
 
-            messages = [{"role": "system", "content": system_msg}, {"role": "user", "content": user_input}]
-            
-            # Log user prompt to SCB (both local and remote)
-            try:
-                scb_store.append_chat(user_input, actor="user")
-                scb_remote_append({"type": "event", "actor": "user", "text": user_input})
-            except Exception as e:
-                print(f"{ColorText.RED}[Client] Failed to log user input to SCB: {e}{ColorText.END}")
-            
-            # Process in streaming mode
-            text_buffer = []
-            full_reply_text = ""
-            print("AI: ", end="", flush=True)
-            
-            try:
-                # Stream response from LLM
-                for chunk in llm_service.generate_stream(
-                    messages,
-                    max_tokens=1000,
-                    temperature=0.7,
-                    top_p=0.9
-                ):
-                    print(chunk, end="", flush=True)
-                    full_reply_text += chunk
-                    
-                    # Process chunk for TTS
-                    process_llm_chunk(chunk, tts_chunk_queue, text_buffer)
-            except Exception as e:
-                print(f"\nError generating response: {e}")
-                continue
-                
-            # Process any remaining text in buffer
-            if text_buffer:
-                final_text = ''.join(text_buffer)
-                if final_text.strip():
-                    tts_chunk_queue.put(final_text)
-                    
-            print("\n")  # Add some space after the response
-            
-            # After generation complete, log AI speech to SCB
-            try:
-                speech_entry = {"type": "speech", "actor": "vtuber", "text": full_reply_text}
-                scb_store.append(speech_entry)
-                scb_remote_append(speech_entry)
-            except Exception as e:
-                print(f"{ColorText.RED}[Client] Failed to log AI speech to SCB: {e}{ColorText.END}")
+                system_msg = "\n\n".join(system_parts)
+
+                messages = [{"role": "system", "content": system_msg}, {"role": "user", "content": user_input}]
+
+                # Log user prompt to SCB (both local and remote)
+                try:
+                    scb_store.append_chat(user_input, actor="user")
+                    scb_remote_append({"type": "event", "actor": "user", "text": user_input})
+                except Exception as e:
+                    print(f"{ColorText.RED}[Client] Failed to log user input to SCB: {e}{ColorText.END}")
+
+                # Process in streaming mode (text)
+                text_buffer = []
+                full_reply_text = ""
+                print("AI: ", end="", flush=True)
+
+                try:
+                    # Stream response from LLM
+                    for chunk in llm_service.generate_stream(
+                        messages,
+                        max_tokens=1000,
+                        temperature=0.7,
+                        top_p=0.9
+                    ):
+                        print(chunk, end="", flush=True)
+                        full_reply_text += chunk
+                        
+                        # Process chunk for TTS
+                        process_llm_chunk(chunk, tts_chunk_queue, text_buffer)
+                except Exception as e:
+                    print(f"\nError generating response: {e}")
+                    continue
+
+                # Process any remaining text in buffer
+                if text_buffer:
+                    final_text = ''.join(text_buffer)
+                    if final_text.strip():
+                        tts_chunk_queue.put(final_text)
+
+                print("\n")  # Add some space after the response
+
+                # After generation complete, log AI speech to SCB
+                try:
+                    speech_entry = {"type": "speech", "actor": "vtuber", "text": full_reply_text}
+                    scb_store.append(speech_entry)
+                    scb_remote_append(speech_entry)
+                except Exception as e:
+                    print(f"{ColorText.RED}[Client] Failed to log AI speech to SCB: {e}{ColorText.END}")
+
+            else:
+                # ------- Remote streaming pipeline --------
+
+                # Ensure audio & blendshape threads are running
+                if not any(t.name == "AudioStreamThread" for t in threading.enumerate()):
+                    audio_thread = threading.Thread(target=stream_audio_player, daemon=True, name="AudioStreamThread")
+                    audio_thread.start()
+
+                if animation_available and not args.no_animation and not any(t.name == "BlendshapeStreamThread" for t in threading.enumerate()):
+                    blendshape_thread = threading.Thread(
+                        target=stream_blendshape_player,
+                        args=(py_face, socket_connection),
+                        daemon=True,
+                        name="BlendshapeStreamThread"
+                    )
+                    blendshape_thread.start()
+
+                print("AI (speech only – streaming):")
+
+                try:
+                    for audio_bytes, blendshapes in tts_service.stream_speech_and_blendshapes(user_input):
+                        if audio_bytes:
+                            audio_queue.put(audio_bytes)
+                        if blendshapes:
+                            for frame in blendshapes:
+                                blendshape_queue.put(frame)
+                except Exception as e:
+                    print(f"Streaming TTS error: {e}")
+
+                # Signal end of streams
+                audio_queue.put(None)
+                blendshape_queue.put(None)
             
     except KeyboardInterrupt:
         print("\nExiting...")
     
     # Cleanup
-    tts_chunk_queue.put(None)  # Signal TTS worker to stop
-    tts_thread.join(timeout=5)
+    if not streaming_mode:
+        tts_chunk_queue.put(None)  # Signal TTS worker to stop
+        tts_thread.join(timeout=5)
+    else:
+        # Signal audio & blendshape threads to stop if running
+        audio_queue.put(None)
+        blendshape_queue.put(None)
 
 if __name__ == "__main__":
     main() 

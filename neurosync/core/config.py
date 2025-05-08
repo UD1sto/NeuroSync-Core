@@ -64,7 +64,10 @@ def get_llm_config(system_message=BASE_SYSTEM_MESSAGE):
     config = {
         "USE_LOCAL_LLM": use_local_llm,
         "USE_STREAMING": use_streaming,
-        "system_message": system_message
+        "system_message": system_message,
+        # Streaming / chunking parameters
+        "flush_token_count": int(os.getenv("LLM_FLUSH_TOKEN_COUNT", "40")),
+        "respect_sentence_endings": os.getenv("LLM_RESPECT_SENTENCE_ENDINGS", "false").lower() == "true"
     }
     
     # OpenAI configuration
