@@ -1,7 +1,6 @@
 flask>=2.3.3
 Flask-Cors>=4.0 
-numpy>=1.25.0
-torch>=2.0.0
+numpy>=1.24.4
 transformers>=4.30.0
 scipy>=1.10.0
 python-dotenv>=1.0.0
@@ -14,7 +13,6 @@ librosa>=0.10.0
 timecode>=1.0.6
 pydub>=0.25.1
 accelerate>=0.20.0
-bitsandbytes>=0.43.0
 cmake>=3.29.0
 ninja>=1.11.1
 huggingface-hub>=0.24.0
@@ -24,7 +22,8 @@ simpleaudio>=1.0.4
 
 base64io>=1.0.3
 
-fairscale>=0.4.13    
+# fairscale is optional – comment it out for now
+# fairscale>=0.4.13    
 
 # Add redis dependency
 redis>=4.0.0  # Using a version specifier for stability    
