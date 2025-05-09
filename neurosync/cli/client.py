@@ -16,6 +16,8 @@ from io import BytesIO
 import dotenv
 import requests
 import simpleaudio as sa
+import hashlib
+import secrets
 
 # Load environment variables
 dotenv.load_dotenv()
@@ -380,6 +382,30 @@ def main():
         # Signal audio & blendshape threads to stop if running
         audio_queue.put(None)
         blendshape_queue.put(None)
+
+# -----------------------------------------------------------------------------
+# Lightweight job handler for in-process BYOC adapter integration
+# -----------------------------------------------------------------------------
+
+def accept_vtuber_job(payload: dict) -> str:
+    """Handle a VTuber job submitted by the BYOC worker (server_adapter).
+
+    For now this is a placeholder that simply logs the payload and returns a
+    pseudo-random mock job hash so the front-end can display a meaningful ID.
+
+    This keeps everything in-process (no HTTP hop) while the full NeuroSync
+    pipeline integration is still under construction.
+    """
+    print("\n[NeuroSync-Core] accept_vtuber_job called with payload:")
+    try:
+        import json as _json
+        print(_json.dumps(payload, indent=2)[:1000])  # Truncate to avoid log spam
+    except Exception:
+        print(str(payload))
+
+    mock_hash = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
+    print(f"[NeuroSync-Core] Returning mock job hash: {mock_hash}\n")
+    return mock_hash
 
 if __name__ == "__main__":
     main() 
