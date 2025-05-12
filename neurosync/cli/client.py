@@ -9,13 +9,11 @@ import argparse
 import queue
 import threading
 import time
-import sounddevice as sd
 import numpy as np
 from scipy.io import wavfile as wav
 from io import BytesIO
 import dotenv
 import requests
-import simpleaudio as sa
 import hashlib
 import secrets
 
@@ -42,7 +40,6 @@ except ImportError as e:
     print("Will run without animation.")
 
 # Global variables for streaming
-audio_queue = queue.Queue()
 blendshape_queue = queue.Queue()
 is_streaming = threading.Event()
 audio_start   = None       # <-- new global
@@ -101,33 +98,6 @@ def process_llm_chunk(chunk, tts_chunk_queue, text_buffer, buffer_threshold=10):
     
     return False
 
-def stream_audio_player():
-    global audio_start, audio_sr
-    import io, soundfile as sf
-    print("Audio streaming worker started")
-
-    out_stream = None               # reuse a single OutputStream
-    while True:
-        wav_bytes = audio_queue.get()
-        if wav_bytes is None:
-            break
-
-        data, sr = sf.read(io.BytesIO(wav_bytes), dtype='int16')
-        if out_stream is None:
-            out_stream = sd.OutputStream(samplerate=sr,
-                                         channels=1,
-                                         dtype='int16')
-            out_stream.start()
-
-        # mark stream start only once
-        with audio_start_lck:
-            if audio_start is None:
-                audio_start = time.monotonic()
-                audio_sr    = sr
-
-        out_stream.write(data)      # non-blocking
-        audio_queue.task_done()
-
 def stream_blendshape_player(py_face, sock):
     global audio_start
     frame_dur = 1/60.0
@@ -161,17 +131,6 @@ def stream_blendshape_player(py_face, sock):
 def tts_worker(tts_chunk_queue, tts_service, py_face=None, socket_connection=None):
     """Worker that processes text chunks and converts them to speech in real-time"""
     
-    # Start audio streaming worker if it's supported
-    audio_thread = None
-    try:
-        audio_thread = threading.Thread(target=stream_audio_player, daemon=True)
-        audio_thread.start()
-    except Exception as e:
-        print(f"Failed to start audio streaming: {e}")
-    
-    # We no longer manage local per-frame blendshape streaming from the client.
-    blendshape_thread = None
-    
     while True:
         try:
             # Get text chunk from queue
@@ -179,8 +138,6 @@ def tts_worker(tts_chunk_queue, tts_service, py_face=None, socket_connection=Non
             
             # None is the signal to stop
             if text_chunk is None:
-                # Signal streaming threads to stop
-                audio_queue.put(None)
                 break
             
             print(f"\nConverting to speech: '{text_chunk}'")
@@ -188,23 +145,30 @@ def tts_worker(tts_chunk_queue, tts_service, py_face=None, socket_connection=Non
             # Generate speech
             audio_bytes = tts_service.generate_speech(text_chunk)
             
-            # Forward audio to NeuroSync local API which will handle BOTH playback and animation.
-            # Only if that fails will we fall back to local playback (no animation).
+            # Forward audio to NeuroSync local API which will handle BOTH playback (RTMP) and animation.
+            # No fallback to local playback.
             if audio_bytes:
                 forwarded = False
                 url = os.getenv("NEUROSYNC_BLENDSHAPES_URL", "http://127.0.0.1:5000/audio_to_blendshapes")
                 try:
                     import base64
-                    payload = {"audio": base64.b64encode(audio_bytes).decode("utf-8")}
-                    headers = {"Content-Type": "application/json"}
-                    requests.post(url, json=payload, headers=headers, timeout=10.0)
+                    # Send as raw bytes if server expects that, or base64 if it expects JSON
+                    # Current server /audio_to_blendshapes expects raw bytes with octet-stream or wav
+                    headers = {"Content-Type": "audio/wav"} # Or application/octet-stream
+                    # Use requests.post(url, data=audio_bytes, headers=headers, timeout=10.0)
+                    # OR if server expects JSON/base64:
+                    # payload = {"audio": base64.b64encode(audio_bytes).decode("utf-8")}
+                    # headers = {"Content-Type": "application/json"}
+                    # requests.post(url, json=payload, headers=headers, timeout=10.0)
+                    
+                    # Assuming server /audio_to_blendshapes expects raw bytes based on previous adjustments
+                    requests.post(url, data=audio_bytes, headers=headers, timeout=10.0)
+
                     forwarded = True
                 except Exception as e:
-                    print(f"Could not forward audio to NeuroSync API (falling back to local playback): {e}")
+                    print(f"Could not forward audio to NeuroSync API ({url}): {e}")
                 
-                # Fallback to local playback only when forwarding failed
-                if not forwarded:
-                    audio_queue.put(audio_bytes)
+                # Removed fallback to local playback via audio_queue
             
         except Exception as e:
             print(f"Error in TTS worker: {e}")
@@ -341,11 +305,6 @@ def main():
             else:
                 # ------- Remote streaming pipeline --------
 
-                # Ensure audio & blendshape threads are running
-                if not any(t.name == "AudioStreamThread" for t in threading.enumerate()):
-                    audio_thread = threading.Thread(target=stream_audio_player, daemon=True, name="AudioStreamThread")
-                    audio_thread.start()
-
                 if animation_available and not args.no_animation and not any(t.name == "BlendshapeStreamThread" for t in threading.enumerate()):
                     blendshape_thread = threading.Thread(
                         target=stream_blendshape_player,
@@ -359,8 +318,6 @@ def main():
 
                 try:
                     for audio_bytes, blendshapes in tts_service.stream_speech_and_blendshapes(user_input):
-                        if audio_bytes:
-                            audio_queue.put(audio_bytes)
                         if blendshapes:
                             for frame in blendshapes:
                                 blendshape_queue.put(frame)
@@ -368,7 +325,6 @@ def main():
                     print(f"Streaming TTS error: {e}")
 
                 # Signal end of streams
-                audio_queue.put(None)
                 blendshape_queue.put(None)
             
     except KeyboardInterrupt:
@@ -379,8 +335,7 @@ def main():
         tts_chunk_queue.put(None)  # Signal TTS worker to stop
         tts_thread.join(timeout=5)
     else:
-        # Signal audio & blendshape threads to stop if running
-        audio_queue.put(None)
+        # Signal blendshape thread to stop if running
         blendshape_queue.put(None)
 
 # -----------------------------------------------------------------------------

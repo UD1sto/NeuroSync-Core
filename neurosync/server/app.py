@@ -17,12 +17,12 @@ import sys
 import threading
 import time
 from io import BytesIO
+import tempfile # Added for temporary audio files
+import logging # Added for logging
 
 import flask
 import numpy as np
 import scipy.io.wavfile as wav
-import sounddevice as sd # Added for local audio playback
-import soundfile as sf # Added for reading WAV bytes in playback worker
 import torch
 import dotenv
 from flask import Response, jsonify, request, stream_with_context, Blueprint
@@ -59,6 +59,8 @@ from neurosync.core.bridge import BridgeCache # Assuming utils is still at the r
 from neurosync.core.color_text import ColorText # Assuming a utility class
 from neurosync.core.scb_store import scb_store
 from neurosync.core.summarizer import SummarizerThread
+from neurosync.audio.play_audio import play_audio_from_path
+from neurosync.audio.save_audio import save_audio_file
 
 # Load environment variables
 dotenv.load_dotenv()
@@ -581,96 +583,74 @@ def tts_blendshape_worker(model, tokenizer, sample_rate, device):
 
 
 def audio_playback_worker(playback_queue, sample_rate, device_index=None):
-    """Worker function to play audio chunks from a queue using sounddevice."""
-    stream = None
-    try:
-        if device_index is None or device_index == "auto":
-             try:
-                 print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Available audio output devices:")
-                 print(sd.query_devices())
-                 default_output_device = sd.default.device[1] # Index 1 = output
-                 if default_output_device == -1:
-                      print(f"{ColorText.YELLOW}⚠️ No default audio output device found. Playback disabled.{ColorText.END}")
-                      device_index = None # Disable playback
-                 else:
-                      device_index = default_output_device
-                      print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Using default output device index: {device_index}")
-             except Exception as e:
-                 print(f"{ColorText.RED}[PlaybackWorker] Error querying audio devices: {e}. Playback disabled.{ColorText.END}")
-                 device_index = None # Disable playback
+    """Worker function to play audio chunks via RTMP streaming."""
+    logger = logging.getLogger(__name__) # Use logger
+    playback_active = True
 
-        if device_index is not None:
-            print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Initializing stream. Sample Rate: {sample_rate}, Device: {device_index}")
-            stream = sd.OutputStream(
-                samplerate=sample_rate,
-                channels=1,
-                dtype='int16', # Expecting int16 bytes
-                device=device_index
-            )
-            stream.start()
-            print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Stream started.")
-        else:
-             print(f"{ColorText.YELLOW}[PlaybackWorker] No output device selected. Audio playback will be skipped.{ColorText.END}")
+    # NOTE: The `device_index` parameter is no longer used for sounddevice
+    # but we keep it for signature compatibility unless refactored later.
+    logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Worker started. Waiting for audio chunks...")
 
+    # Use a single Event for synchronization across chunks if needed by play_audio_from_path
+    # In the current design, each chunk triggers its own blocking stream, so a shared
+    # event *between chunks* isn't strictly necessary, but it's good practice
+    # if play_audio_from_path might become non-blocking.
+    start_event = threading.Event()
 
-        while True:
-            audio_chunk_wav_bytes = playback_queue.get() # Now expects WAV formatted bytes
-            if audio_chunk_wav_bytes is None: # End signal
-                print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Received stop signal.")
-                break
-
-            if stream and len(audio_chunk_wav_bytes) > 0:
-                try:
-                    # Convert WAV bytes back to numpy array for sounddevice
-                    # The 'sf' module (soundfile) should be imported at the top of the file
-                    audio_data, read_samplerate = sf.read(BytesIO(audio_chunk_wav_bytes), dtype='int16')
-                    
-                    # Basic check for samplerate consistency, though ideally they should always match
-                    if read_samplerate != sample_rate:
-                        print(f"{ColorText.YELLOW}[PlaybackWorker] Warning: Samplerate mismatch. Expected {sample_rate}, got {read_samplerate}. Playback might be affected.{ColorText.END}")
-
-                    # Ensure audio_data is 1D if stream is mono (sounddevice expects this)
-                    if audio_data.ndim > 1 and stream.channels == 1:
-                        audio_data = audio_data[:, 0] # Take first channel
-                    elif audio_data.ndim == 1 and stream.channels > 1:
-                        # If stream is stereo but data is mono, duplicate mono to stereo (optional, depends on desired behavior)
-                        # For now, we assume if stream.channels > 1, sounddevice handles mono data correctly or audio_data is already stereo.
-                        pass 
-
-                    stream.write(audio_data)
-                    # print(f"Played chunk: {len(audio_data)} samples") # Verbose
-                except Exception as e:
-                    print(f"{ColorText.RED}[PlaybackWorker] Error playing audio chunk: {e}{ColorText.END}")
-            elif not stream:
-                # If stream isn't initialized, just consume the queue items
-                pass # Skip playback
-            # else: # Empty chunk, do nothing
-            #     print(f"{ColorText.YELLOW}[PlaybackWorker] Received empty audio chunk. Skipping.{ColorText.END}") # Debug
-
-            playback_queue.task_done()
-
-    except Exception as e:
-        print(f"{ColorText.RED}[PlaybackWorker] Error: {e}{ColorText.END}")
-        import traceback
-        print(f"{ColorText.RED}Traceback:\n{traceback.format_exc()}{ColorText.END}")
-    finally:
-        if stream:
-            try:
-                print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Stopping and closing audio stream...")
-                stream.stop()
-                stream.close()
-                print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Stream stopped and closed.")
-            except Exception as e:
-                print(f"{ColorText.RED}[PlaybackWorker] Error closing stream: {e}{ColorText.END}")
-        # Ensure the final None is marked done if loop exited unexpectedly
+    while playback_active:
+        temp_audio_path = None # Ensure path is reset
         try:
-            if not playback_queue.empty() and playback_queue.get(block=False) is None:
+            audio_chunk_wav_bytes = playback_queue.get() # Expects WAV formatted bytes
+            if audio_chunk_wav_bytes is None: # End signal
+                logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Received stop signal.")
+                playback_active = False
+                continue # Exit loop after setting flag
+
+            if len(audio_chunk_wav_bytes) == 0:
+                logger.warning(f"{ColorText.YELLOW}[PlaybackWorker-RTMP] Received empty audio chunk. Skipping.{ColorText.END}")
                 playback_queue.task_done()
+                continue
+
+            # 1. Save chunk bytes to a temporary WAV file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_audio_path = temp_file.name
+                # We have WAV bytes already, just write them.
+                # No need for save_audio_file which expects raw float/int data.
+                temp_file.write(audio_chunk_wav_bytes)
+
+            # 2. Stream the temporary file via RTMP
+            logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Streaming temp file: {temp_audio_path}")
+            # Reset and set the event just before starting the stream for this chunk
+            start_event.clear()
+            start_event.set() # Signal play_audio_from_path to proceed immediately
+            play_audio_from_path(temp_audio_path, start_event)
+            logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Finished streaming: {temp_audio_path}")
+
         except queue.Empty:
-            pass
-        except Exception as qe:
-             print(f"{ColorText.RED}[PlaybackWorker] Error clearing queue on exit: {qe}{ColorText.END}")
-        print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Worker thread finished.")
+             # This shouldn't happen with blocking get(), but handle defensively
+             logger.warning(f"{ColorText.YELLOW}[PlaybackWorker-RTMP] Queue reported empty unexpectedly.{ColorText.END}")
+             time.sleep(0.05) # Avoid busy-waiting
+             continue
+        except Exception as e:
+            logger.error(f"{ColorText.RED}[PlaybackWorker-RTMP] Error processing audio chunk: {e}{ColorText.END}", exc_info=True)
+            # Optionally, add a short sleep to prevent rapid error loops
+            time.sleep(0.1)
+        finally:
+            # 3. Clean up the temporary file
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.remove(temp_audio_path)
+                    # logger.debug(f"[PlaybackWorker-RTMP] Deleted temp file: {temp_audio_path}")
+                except OSError as e:
+                    logger.error(f"{ColorText.RED}[PlaybackWorker-RTMP] Error deleting temp file {temp_audio_path}: {e}{ColorText.END}")
+            # Ensure task_done is called even if errors occur
+            if playback_active: # Don't call after receiving None
+                 try:
+                     playback_queue.task_done()
+                 except ValueError:
+                     pass # Ignore if called multiple times for the same item on error
+
+    logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Worker thread finished.")
 
 
 # --- Flask Routes ---
