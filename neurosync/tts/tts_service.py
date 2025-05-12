@@ -18,7 +18,8 @@ except ImportError:
 class TTSProvider(Enum):
     LOCAL = "local"
     ELEVENLABS = "elevenlabs"
-    NEUROSYNC = "neurosync"  # Combined TTS + blendshapes endpoint
+    NEUROSYNC = "neurosync"            # Combined TTS + blendshapes endpoint (non-stream)
+    NEUROSYNC_STREAM = "neurosync_stream"  # Streaming endpoint returning NDJSON chunks
 
 class TTSService:
     """Unified interface for TTS services that can switch between local TTS and ElevenLabs"""
@@ -52,6 +53,9 @@ class TTSService:
         elif self.provider == TTSProvider.NEUROSYNC:
             self.endpoint = os.getenv("NEUROSYNC_TTS_URL", "http://127.0.0.1:5000/text_to_blendshapes")
             self.voice = os.getenv("NEUROSYNC_TTS_VOICE")
+        elif self.provider == TTSProvider.NEUROSYNC_STREAM:
+            self.endpoint = os.getenv("NEUROSYNC_STREAM_URL", "http://127.0.0.1:5000/stream_text_to_blendshapes")
+            self.voice = os.getenv("NEUROSYNC_TTS_VOICE")  # Voice still optional
 
     def generate_speech(self, text: str) -> bytes:
         """
@@ -70,6 +74,11 @@ class TTSService:
         elif self.provider == TTSProvider.NEUROSYNC:
             audio, _ = self._neurosync_tts_with_blendshapes(text)
             return audio
+        elif self.provider == TTSProvider.NEUROSYNC_STREAM:
+            # In streaming mode we cannot return the whole audio upfront.
+            # Provide empty bytes with a warning – caller should use stream_speech_and_blendshapes().
+            print("Warning: generate_speech() called on streaming TTS provider. Use stream_speech_and_blendshapes() instead.")
+            return b""
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
 
@@ -218,4 +227,58 @@ class TTSService:
             elif isinstance(e, requests.exceptions.Timeout):
                 print("Request timed out: The blendshape generation process may be taking too long.")
 
-            return [] 
+            return []
+
+    # ------------------------------------------------------------------
+    # Streaming helpers
+    # ------------------------------------------------------------------
+
+    def stream_speech_and_blendshapes(self, text: str):
+        """Yield (audio_bytes, blendshapes_list) tuples as they arrive from the streaming endpoint."""
+        if self.provider != TTSProvider.NEUROSYNC_STREAM:
+            raise ValueError("stream_speech_and_blendshapes is only supported for NEUROSYNC_STREAM provider")
+
+        import json, base64, time
+        try:
+            payload = {"prompt": text}
+            if self.voice:
+                payload["voice"] = self.voice
+
+            print(f"Connecting to streaming TTS endpoint: {self.endpoint}")
+            with requests.post(self.endpoint, json=payload, stream=True) as response:
+                response.raise_for_status()
+
+                for raw_line in response.iter_lines():
+                    if not raw_line:
+                        continue  # skip keep-alive newlines
+                    try:
+                        data = json.loads(raw_line.decode("utf-8"))
+                    except Exception as e:
+                        print(f"[TTSService] Failed to parse stream chunk: {e}. Line (trunc): {raw_line[:120]}...")
+                        continue
+
+                    if data.get("status") == "completed":
+                        break  # stream finished
+
+                    if "error" in data:
+                        print(f"[TTSService] Error from stream: {data['error']}")
+                        break
+
+                    audio_b64 = data.get("audio")
+                    if not audio_b64:
+                        # nothing useful in this chunk
+                        continue
+
+                    try:
+                        audio_bytes = base64.b64decode(audio_b64)
+                    except Exception as e:
+                        print(f"[TTSService] Failed to decode audio chunk: {e}")
+                        continue
+
+                    blendshapes = data.get("blendshapes", [])
+                    yield audio_bytes, blendshapes
+
+        except requests.RequestException as rexc:
+            print(f"[TTSService] Streaming request error: {rexc}")
+        except Exception as e:
+            print(f"[TTSService] Unexpected error in stream: {e}") 

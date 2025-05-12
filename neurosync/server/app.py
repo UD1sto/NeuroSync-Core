@@ -17,11 +17,12 @@ import sys
 import threading
 import time
 from io import BytesIO
+import tempfile # Added for temporary audio files
+import logging # Added for logging
 
 import flask
 import numpy as np
 import scipy.io.wavfile as wav
-import sounddevice as sd # Added for local audio playback
 import torch
 import dotenv
 from flask import Response, jsonify, request, stream_with_context, Blueprint
@@ -33,6 +34,7 @@ from transformers import (
     utils as hf_utils
 )
 from flask_cors import CORS  # NEW: CORS support
+import openai # Added for OpenAI API access
 
 # Add the project root to sys.path to allow absolute imports
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -57,6 +59,8 @@ from neurosync.core.bridge import BridgeCache # Assuming utils is still at the r
 from neurosync.core.color_text import ColorText # Assuming a utility class
 from neurosync.core.scb_store import scb_store
 from neurosync.core.summarizer import SummarizerThread
+from neurosync.audio.play_audio import play_audio_from_path
+from neurosync.audio.save_audio import save_audio_file
 
 # Load environment variables
 dotenv.load_dotenv()
@@ -137,6 +141,20 @@ def load_llm_tts_models():
     global pipeline_models
     if not pipeline_models:
         print(f"{ColorText.BOLD}[Pipeline]{ColorText.END} Loading LLM and TTS models...")
+        # Determine LLM provider strategy for the server's internal pipeline
+        server_llm_provider = os.getenv("LLM_PROVIDER", "huggingface").lower()
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+
+        # Initialize pipeline_models with the provider information early
+        pipeline_models = {
+            "llm_provider": server_llm_provider if server_llm_provider == "openai" and openai_api_key else "huggingface",
+            "llm_model": None,
+            "llm_tokenizer": None,
+            "tts_model": None,
+            "tts_tokenizer": None,
+            "sample_rate": 16000 # Default, will be updated by TTS model
+        }
+
         hf_utils.logging.set_verbosity_info()
 
         try:
@@ -156,87 +174,92 @@ def load_llm_tts_models():
             os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
             os.environ["TRANSFORMERS_VERBOSITY"] = "info"
 
-            token_arg = {"token": llm_tts_config.hf_token} if llm_tts_config.hf_token and llm_tts_config.hf_token != "your_huggingface_token_here" else {}
+            if pipeline_models["llm_provider"] == "huggingface":
+                print(f"{ColorText.BOLD}[LLM-Server]{ColorText.END} Using HuggingFace provider for internal LLM pipeline.")
+                token_arg = {"token": llm_tts_config.hf_token} if llm_tts_config.hf_token and llm_tts_config.hf_token != "your_huggingface_token_here" else {}
 
-            print(f"{ColorText.BOLD}[LLM]{ColorText.END} Loading tokenizer (trust_remote_code={llm_tts_config.trust_remote_code}, use_fast=False)...")
-            llm_tokenizer = AutoTokenizer.from_pretrained(
-                llm_tts_config.llm_model,
-                trust_remote_code=llm_tts_config.trust_remote_code,
-                use_fast=False, # Avoid sentencepiece dependency if possible
-                **token_arg
-            )
+                print(f"{ColorText.BOLD}[LLM]{ColorText.END} Loading tokenizer (trust_remote_code={llm_tts_config.trust_remote_code}, use_fast=False)... for {llm_tts_config.llm_model}")
+                llm_tokenizer = AutoTokenizer.from_pretrained(
+                    llm_tts_config.llm_model, # This is the HF model ID from env (e.g. mistral)
+                    trust_remote_code=llm_tts_config.trust_remote_code,
+                    use_fast=False, # Avoid sentencepiece dependency if possible
+                    **token_arg
+                )
 
-            model_kwargs = {
-                "trust_remote_code": llm_tts_config.trust_remote_code,
-                "device_map": "auto",
-                **token_arg
-            }
+                model_kwargs = {
+                    "trust_remote_code": llm_tts_config.trust_remote_code,
+                    "device_map": "auto",
+                    **token_arg
+                }
 
-            if llm_tts_config.quantization:
-                 # Dynamically import bitsandbytes only if needed
-                try:
-                    import bitsandbytes as bnb
-                    print(f"{ColorText.BOLD}[LLM]{ColorText.END} Enabling {llm_tts_config.quantization} quantization...")
+                if llm_tts_config.quantization:
+                    # Dynamically import bitsandbytes only if needed
+                    try:
+                        import bitsandbytes as bnb # type: ignore
+                        print(f"{ColorText.BOLD}[LLM]{ColorText.END} Enabling {llm_tts_config.quantization} quantization...")
 
-                    if llm_tts_config.quantization == "int8":
-                         model_kwargs["load_in_8bit"] = True
-                         print(f"{ColorText.BOLD}[LLM]{ColorText.END} Using INT8 quantization.")
-                    elif llm_tts_config.quantization == "fp4": # Common name for 4bit
-                         quant_type = os.getenv("BNB_4BIT_QUANT_TYPE", "nf4")
-                         use_double_quant = os.getenv("BNB_4BIT_USE_DOUBLE_QUANT", "false").lower() == "true"
-                         compute_dtype_str = os.getenv("BNB_4BIT_COMPUTE_DTYPE", "float16")
-                         compute_dtype = torch.float16 if compute_dtype_str == "float16" else torch.bfloat16
+                        if llm_tts_config.quantization == "int8":
+                            model_kwargs["load_in_8bit"] = True
+                            print(f"{ColorText.BOLD}[LLM]{ColorText.END} Using INT8 quantization.")
+                        elif llm_tts_config.quantization == "fp4": # Common name for 4bit
+                            quant_type = os.getenv("BNB_4BIT_QUANT_TYPE", "nf4")
+                            use_double_quant = os.getenv("BNB_4BIT_USE_DOUBLE_QUANT", "false").lower() == "true"
+                            compute_dtype_str = os.getenv("BNB_4BIT_COMPUTE_DTYPE", "float16")
+                            compute_dtype = torch.float16 if compute_dtype_str == "float16" else torch.bfloat16
 
-                         # Check if bnb version supportsnf4_compute_dtype etc.
-                         from packaging import version
-                         if version.parse(importlib.metadata.version("bitsandbytes")) >= version.parse("0.41.0"):
-                            from transformers import BitsAndBytesConfig
-                            bnb_config = BitsAndBytesConfig(
-                                load_in_4bit=True,
-                                bnb_4bit_quant_type=quant_type,
-                                bnb_4bit_use_double_quant=use_double_quant,
-                                bnb_4bit_compute_dtype=compute_dtype
-                            )
-                            model_kwargs["quantization_config"] = bnb_config
-                            print(f"{ColorText.BOLD}[LLM]{ColorText.END} Using 4-bit quantization (type={quant_type}, double_quant={use_double_quant}, compute_dtype={compute_dtype_str}).")
-                         else:
-                            # Fallback for older bitsandbytes versions
-                            model_kwargs["load_in_4bit"] = True
-                            print(f"{ColorText.YELLOW}⚠️ Using legacy 4-bit quantization (update bitsandbytes for full config options).{ColorText.END}")
+                            from packaging import version # type: ignore
+                            if version.parse(importlib.metadata.version("bitsandbytes")) >= version.parse("0.41.0"):
+                                from transformers import BitsAndBytesConfig
+                                bnb_config = BitsAndBytesConfig(
+                                    load_in_4bit=True,
+                                    bnb_4bit_quant_type=quant_type,
+                                    bnb_4bit_use_double_quant=use_double_quant,
+                                    bnb_4bit_compute_dtype=compute_dtype
+                                )
+                                model_kwargs["quantization_config"] = bnb_config
+                                print(f"{ColorText.BOLD}[LLM]{ColorText.END} Using 4-bit quantization (type={quant_type}, double_quant={use_double_quant}, compute_dtype={compute_dtype_str}).")
+                            else:
+                                model_kwargs["load_in_4bit"] = True
+                                print(f"{ColorText.YELLOW}⚠️ Using legacy 4-bit quantization (update bitsandbytes for full config options).{ColorText.END}")
+                        else:
+                            print(f"{ColorText.YELLOW}⚠️ Unsupported quantization type '{llm_tts_config.quantization}'. Loading model without quantization.{ColorText.END}")
+                    except ImportError:
+                        print(f"{ColorText.YELLOW}⚠️ bitsandbytes not installed. Cannot apply quantization. Install with 'pip install bitsandbytes'.{ColorText.END}")
+                        llm_tts_config.quantization = "" # Disable quantization if library not found
 
-                    else:
-                         print(f"{ColorText.YELLOW}⚠️ Unsupported quantization type '{llm_tts_config.quantization}'. Loading model without quantization.{ColorText.END}")
+                print(f"{ColorText.BOLD}[LLM]{ColorText.END} Loading model '{llm_tts_config.llm_model}' with quantization='{llm_tts_config.quantization or 'None'}'...")
+                llm_model = AutoModelForCausalLM.from_pretrained(
+                    llm_tts_config.llm_model, # This is the HF model ID
+                    **model_kwargs
+                )
 
-                except ImportError:
-                    print(f"{ColorText.YELLOW}⚠️ bitsandbytes not installed. Cannot apply quantization. Install with 'pip install bitsandbytes'.{ColorText.END}")
-                    llm_tts_config.quantization = "" # Disable quantization if library not found
+                if llm_tokenizer.pad_token is None:
+                    llm_tokenizer.pad_token = llm_tokenizer.eos_token
 
-
-            print(f"{ColorText.BOLD}[LLM]{ColorText.END} Loading model with quantization='{llm_tts_config.quantization or 'None'}'...")
-            llm_model = AutoModelForCausalLM.from_pretrained(
-                llm_tts_config.llm_model,
-                **model_kwargs
-            )
-
-            if llm_tokenizer.pad_token is None:
-                llm_tokenizer.pad_token = llm_tokenizer.eos_token
+                pipeline_models["llm_model"] = llm_model
+                pipeline_models["llm_tokenizer"] = llm_tokenizer
+            elif pipeline_models["llm_provider"] == "openai":
+                print(f"{ColorText.BOLD}[LLM-Server]{ColorText.END} Using OpenAI provider for internal LLM pipeline. No local LLM model will be loaded by the server.")
+                # No HuggingFace LLM model or tokenizer to load in this case.
+                # OPENAI_API_KEY and OPENAI_MODEL will be used by the worker.
+                pass # llm_model and llm_tokenizer remain None in pipeline_models
 
             # Load TTS
             print(f"\n{ColorText.BOLD}[TTS]{ColorText.END} Loading TTS model: {llm_tts_config.tts_model}...")
             print(f"{ColorText.YELLOW}If downloading, progress will be displayed below:{ColorText.END}")
-            tts_tokenizer = AutoTokenizer.from_pretrained(llm_tts_config.tts_model, **token_arg)
-            tts_model = VitsModel.from_pretrained(llm_tts_config.tts_model, **token_arg).to(device)
+            # Use a fresh token_arg for TTS, as it might be different from LLM's needs (e.g. if LLM is openai)
+            tts_token_arg = {"token": llm_tts_config.hf_token} if llm_tts_config.hf_token and llm_tts_config.hf_token != "your_huggingface_token_here" else {}
+            tts_tokenizer = AutoTokenizer.from_pretrained(llm_tts_config.tts_model, **tts_token_arg)
+            tts_model = VitsModel.from_pretrained(llm_tts_config.tts_model, **tts_token_arg).to(device)
 
             sample_rate = tts_model.config.sampling_rate
             print(f"{ColorText.BOLD}[TTS]{ColorText.END} TTS sample rate: {sample_rate} Hz")
 
-            pipeline_models = {
-                "llm_model": llm_model,
-                "llm_tokenizer": llm_tokenizer,
-                "tts_model": tts_model,
-                "tts_tokenizer": tts_tokenizer,
-                "sample_rate": sample_rate
-            }
+            # Update TTS parts in the existing pipeline_models dictionary
+            pipeline_models["tts_model"] = tts_model
+            pipeline_models["tts_tokenizer"] = tts_tokenizer
+            pipeline_models["sample_rate"] = sample_rate
+
             print(f"{ColorText.BOLD}[Pipeline]{ColorText.END} Models loaded successfully!")
 
         except Exception as e:
@@ -244,7 +267,7 @@ def load_llm_tts_models():
             print(f"{ColorText.RED}[ERROR] Failed to load models: {str(e)}{ColorText.END}")
             print(f"{ColorText.RED}Traceback:\n{traceback.format_exc()}{ColorText.END}")
             # Clear partially loaded models to avoid issues
-            pipeline_models = {}
+            pipeline_models = {} # Reset on failure
             raise # Re-raise to stop the application if models fail to load
 
     return pipeline_models
@@ -327,12 +350,16 @@ CORS(app, resources={r"/scb/*": {"origins": allowed_origins}})
 
 # --- Worker Functions ---
 
-def llm_streaming_worker(model, tokenizer, prompt, device):
+def llm_streaming_worker(pipeline_models_dict, prompt, device):
     """Streams text from LLM, logs to SCB and sends chunks to TTS queue"""
     # Log user prompt as event
     scb_store.append_chat(prompt, actor='user')
     print(f"\n{ColorText.BOLD}[LLM]{ColorText.END} Generating response...")
     try:
+        server_llm_provider = pipeline_models_dict.get("llm_provider", "huggingface")
+
+        # Construct the base prompt / messages structure
+        # This structure is used by both OpenAI and the full_prompt for HuggingFace
         persona = "You are Mai, a witty and helpful VTuber assistant with a dry sense of humor."
         summary = scb_store.get_summary()
         recent_chat = scb_store.get_recent_chat(3)
@@ -345,51 +372,123 @@ def llm_streaming_worker(model, tokenizer, prompt, device):
         if recent_chat:
             prompt_parts.append(f"Recent chat:\n{recent_chat}")
         prompt_parts.append(f"User: {prompt}\nAI:")
-        full_prompt = "\n\n".join(prompt_parts)
-        print(f"{ColorText.BOLD}[LLM]{ColorText.END} Prompt (trunc): {full_prompt[:300]}...")
-        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-        inputs = tokenizer(full_prompt, return_tensors="pt").to(device)
-        generation_kwargs = {
-            "input_ids": inputs["input_ids"],
-            "attention_mask": inputs["attention_mask"],
-            "max_new_tokens": llm_tts_config.llm_max_length,
-            "temperature": llm_tts_config.llm_temperature,
-            "top_p": llm_tts_config.llm_top_p,
-            "repetition_penalty": llm_tts_config.llm_repetition_penalty,
-            "do_sample": True,
-            "streamer": streamer,
-            "pad_token_id": tokenizer.eos_token_id
-        }
-        thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
-        thread.start()
+
         full_text = ""
         buffer = ""
         natural_breakpoints = [".", "!", "?", ";", ":", ","]
         priority_breakpoints = [".", "!", "?"]
-        chunk_id = 0
-        for new_text in streamer:
-            full_text += new_text
-            buffer += new_text
-            # decide split
-            send = False
-            if any(bp in buffer for bp in priority_breakpoints) and buffer.count(" ") >= 3:
-                idx = max(buffer.rfind(bp) for bp in priority_breakpoints)
-                send = True
-                cut = buffer[:idx+1].strip()
-                buffer = buffer[idx+1:].strip()
-            elif buffer.count(" ") >= llm_tts_config.chunk_word_threshold:
-                idx = buffer.rfind(" ")
-                cut = buffer[:idx].strip() if idx != -1 else buffer.strip()
-                buffer = buffer[idx:].strip() if idx != -1 else ""
-                send = True
-            if send and cut:
-                chunk_id += 1
-                text_queue.put((cut, chunk_id))
+        chunk_id_counter = 0 # Use a simple counter for chunk IDs
+
+        if server_llm_provider == "openai":
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            openai_model_name = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+            if not openai_api_key:
+                print(f"{ColorText.RED}[LLM-Server] OpenAI provider selected, but OPENAI_API_KEY is not set. Cannot proceed.{ColorText.END}")
+                text_queue.put((None, None))
+                return ""
+
+            print(f"{ColorText.BOLD}[LLM-Server]{ColorText.END} Using OpenAI ({openai_model_name}) for text generation.")
+
+            # Prepare messages for OpenAI
+            system_message_for_openai = "\n\n".join(prompt_parts[:-1]) # All parts except the "User: ... AI:" part
+            openai_messages = [
+                {"role": "system", "content": system_message_for_openai},
+                {"role": "user", "content": prompt} # Just the user's prompt
+            ]
+
+            try:
+                oai_client = openai.OpenAI(api_key=openai_api_key)
+                response_stream = oai_client.chat.completions.create(
+                    model=openai_model_name,
+                    messages=openai_messages,
+                    max_tokens=llm_tts_config.llm_max_length,
+                    temperature=llm_tts_config.llm_temperature,
+                    top_p=llm_tts_config.llm_top_p,
+                    stream=True
+                )
+
+                for chunk in response_stream:
+                    new_text = chunk.choices[0].delta.content if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content else ""
+                    if new_text:
+                        full_text += new_text
+                        buffer += new_text
+                        # Chunking logic (same as below for HF)
+                        send = False
+                        if any(bp in buffer for bp in priority_breakpoints) and buffer.count(" ") >= 3:
+                            idx = max(buffer.rfind(bp) for bp in priority_breakpoints if bp in buffer) # Ensure bp is in buffer
+                            send = True
+                            cut = buffer[:idx+1].strip()
+                            buffer = buffer[idx+1:].strip()
+                        elif buffer.count(" ") >= llm_tts_config.chunk_word_threshold:
+                            idx = buffer.rfind(" ")
+                            cut = buffer[:idx].strip() if idx != -1 else buffer.strip()
+                            buffer = buffer[idx:].strip() if idx != -1 else ""
+                            send = True
+                        if send and cut:
+                            chunk_id_counter += 1
+                            text_queue.put((cut, chunk_id_counter))
+            except Exception as e_openai:
+                print(f"{ColorText.RED}[LLM-Server] OpenAI API error: {e_openai}{ColorText.END}")
+                text_queue.put((None, None))
+                return ""
+        else: # HuggingFace provider
+            print(f"{ColorText.BOLD}[LLM-Server]{ColorText.END} Using HuggingFace model for text generation: {llm_tts_config.llm_model}")
+            hf_model = pipeline_models_dict.get("llm_model")
+            hf_tokenizer = pipeline_models_dict.get("llm_tokenizer")
+
+            if not hf_model or not hf_tokenizer:
+                print(f"{ColorText.RED}[LLM-Server] HuggingFace model or tokenizer not loaded. Cannot proceed.{ColorText.END}")
+                text_queue.put((None, None))
+                return ""
+
+            full_prompt_for_hf = "\n\n".join(prompt_parts)
+            print(f"{ColorText.BOLD}[LLM]{ColorText.END} Prompt (trunc): {full_prompt_for_hf[:300]}...")
+            streamer = TextIteratorStreamer(hf_tokenizer, skip_prompt=True, skip_special_tokens=True)
+            inputs = hf_tokenizer(full_prompt_for_hf, return_tensors="pt").to(device)
+            generation_kwargs = {
+                "input_ids": inputs["input_ids"],
+                "attention_mask": inputs["attention_mask"],
+                "max_new_tokens": llm_tts_config.llm_max_length,
+                "temperature": llm_tts_config.llm_temperature,
+                "top_p": llm_tts_config.llm_top_p,
+                "repetition_penalty": llm_tts_config.llm_repetition_penalty,
+                "do_sample": True,
+                "streamer": streamer,
+                "pad_token_id": hf_tokenizer.eos_token_id
+            }
+            thread = threading.Thread(target=hf_model.generate, kwargs=generation_kwargs)
+            thread.start()
+
+            # Common chunk processing logic for both providers
+            for new_text in streamer: # For HF, streamer yields. For OpenAI, we iterate above.
+                full_text += new_text
+                buffer += new_text
+                # decide split
+                send = False
+                if any(bp in buffer for bp in priority_breakpoints) and buffer.count(" ") >= 3:
+                    idx = max(buffer.rfind(bp) for bp in priority_breakpoints if bp in buffer) # Ensure bp is in buffer
+                    send = True
+                    cut = buffer[:idx+1].strip()
+                    buffer = buffer[idx+1:].strip()
+                elif buffer.count(" ") >= llm_tts_config.chunk_word_threshold:
+                    idx = buffer.rfind(" ")
+                    cut = buffer[:idx].strip() if idx != -1 else buffer.strip()
+                    buffer = buffer[idx:].strip() if idx != -1 else ""
+                    send = True
+                if send and cut:
+                    chunk_id_counter += 1
+                    text_queue.put((cut, chunk_id_counter))
+            if server_llm_provider != "openai": # Join thread for HF
+                thread.join()
+
+        # After loop (either OpenAI or HF)
+        full_text = ""
+        buffer = ""
         if buffer.strip():
-            chunk_id += 1
-            text_queue.put((buffer.strip(), chunk_id))
+            chunk_id_counter += 1
+            text_queue.put((buffer.strip(), chunk_id_counter))
         text_queue.put((None, None))
-        thread.join()
+        
         # Log AI speech
         scb_store.append({"type": "speech", "actor": "vtuber", "text": full_text})
         return full_text
@@ -437,18 +536,18 @@ def tts_blendshape_worker(model, tokenizer, sample_rate, device):
                 audio_int16 = (audio * 32767).astype(np.int16)
                 audio_bytes_io = BytesIO()
                 wav.write(audio_bytes_io, rate=sample_rate, data=audio_int16)
-                audio_bytes_io.seek(0)
+                wav_formatted_bytes = audio_bytes_io.getvalue() # Get the WAV formatted bytes
 
                 # Generate blendshapes
                 # Use the imported function directly
                 blendshapes = generate_facial_data_from_bytes(
-                    audio_bytes_io.read(), blendshape_model, device, config
+                    wav_formatted_bytes, blendshape_model, device, config # Pass WAV bytes
                 )
                 blendshapes_list = blendshapes.tolist() if isinstance(blendshapes, np.ndarray) else blendshapes
                 all_blendshapes.extend(blendshapes_list)
 
-                # Put audio (bytes) and blendshapes (list) in queue
-                audio_blendshape_queue.put((audio_int16.tobytes(), blendshapes_list, chunk_id))
+                # Put WAV formatted audio (bytes) and blendshapes (list) in queue
+                audio_blendshape_queue.put((wav_formatted_bytes, blendshapes_list, chunk_id))
                 print(f"{ColorText.BOLD}[Blendshapes]{ColorText.END} Generated {len(blendshapes_list)} frames for chunk {chunk_id}")
 
             except Exception as e:
@@ -484,82 +583,74 @@ def tts_blendshape_worker(model, tokenizer, sample_rate, device):
 
 
 def audio_playback_worker(playback_queue, sample_rate, device_index=None):
-    """Worker function to play audio chunks from a queue using sounddevice."""
-    stream = None
-    try:
-        if device_index is None or device_index == "auto":
-             try:
-                 print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Available audio output devices:")
-                 print(sd.query_devices())
-                 default_output_device = sd.default.device[1] # Index 1 = output
-                 if default_output_device == -1:
-                      print(f"{ColorText.YELLOW}⚠️ No default audio output device found. Playback disabled.{ColorText.END}")
-                      device_index = None # Disable playback
-                 else:
-                      device_index = default_output_device
-                      print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Using default output device index: {device_index}")
-             except Exception as e:
-                 print(f"{ColorText.RED}[PlaybackWorker] Error querying audio devices: {e}. Playback disabled.{ColorText.END}")
-                 device_index = None # Disable playback
+    """Worker function to play audio chunks via RTMP streaming."""
+    logger = logging.getLogger(__name__) # Use logger
+    playback_active = True
 
-        if device_index is not None:
-            print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Initializing stream. Sample Rate: {sample_rate}, Device: {device_index}")
-            stream = sd.OutputStream(
-                samplerate=sample_rate,
-                channels=1,
-                dtype='int16', # Expecting int16 bytes
-                device=device_index
-            )
-            stream.start()
-            print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Stream started.")
-        else:
-             print(f"{ColorText.YELLOW}[PlaybackWorker] No output device selected. Audio playback will be skipped.{ColorText.END}")
+    # NOTE: The `device_index` parameter is no longer used for sounddevice
+    # but we keep it for signature compatibility unless refactored later.
+    logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Worker started. Waiting for audio chunks...")
 
+    # Use a single Event for synchronization across chunks if needed by play_audio_from_path
+    # In the current design, each chunk triggers its own blocking stream, so a shared
+    # event *between chunks* isn't strictly necessary, but it's good practice
+    # if play_audio_from_path might become non-blocking.
+    start_event = threading.Event()
 
-        while True:
-            audio_chunk_bytes = playback_queue.get()
-            if audio_chunk_bytes is None: # End signal
-                print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Received stop signal.")
-                break
-
-            if stream and len(audio_chunk_bytes) > 0:
-                try:
-                    # Convert bytes (int16) back to numpy array for sounddevice
-                    audio_data = np.frombuffer(audio_chunk_bytes, dtype=np.int16)
-                    stream.write(audio_data)
-                    # print(f"Played chunk: {len(audio_data)} samples") # Verbose
-                except Exception as e:
-                    print(f"{ColorText.RED}[PlaybackWorker] Error playing audio chunk: {e}{ColorText.END}")
-            elif not stream:
-                # If stream isn't initialized, just consume the queue items
-                pass # Skip playback
-            # else: # Empty chunk, do nothing
-            #     print(f"{ColorText.YELLOW}[PlaybackWorker] Received empty audio chunk. Skipping.{ColorText.END}") # Debug
-
-            playback_queue.task_done()
-
-    except Exception as e:
-        print(f"{ColorText.RED}[PlaybackWorker] Error: {e}{ColorText.END}")
-        import traceback
-        print(f"{ColorText.RED}Traceback:\n{traceback.format_exc()}{ColorText.END}")
-    finally:
-        if stream:
-            try:
-                print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Stopping and closing audio stream...")
-                stream.stop()
-                stream.close()
-                print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Stream stopped and closed.")
-            except Exception as e:
-                print(f"{ColorText.RED}[PlaybackWorker] Error closing stream: {e}{ColorText.END}")
-        # Ensure the final None is marked done if loop exited unexpectedly
+    while playback_active:
+        temp_audio_path = None # Ensure path is reset
         try:
-            if not playback_queue.empty() and playback_queue.get(block=False) is None:
+            audio_chunk_wav_bytes = playback_queue.get() # Expects WAV formatted bytes
+            if audio_chunk_wav_bytes is None: # End signal
+                logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Received stop signal.")
+                playback_active = False
+                continue # Exit loop after setting flag
+
+            if len(audio_chunk_wav_bytes) == 0:
+                logger.warning(f"{ColorText.YELLOW}[PlaybackWorker-RTMP] Received empty audio chunk. Skipping.{ColorText.END}")
                 playback_queue.task_done()
+                continue
+
+            # 1. Save chunk bytes to a temporary WAV file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_audio_path = temp_file.name
+                # We have WAV bytes already, just write them.
+                # No need for save_audio_file which expects raw float/int data.
+                temp_file.write(audio_chunk_wav_bytes)
+
+            # 2. Stream the temporary file via RTMP
+            logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Streaming temp file: {temp_audio_path}")
+            # Reset and set the event just before starting the stream for this chunk
+            start_event.clear()
+            start_event.set() # Signal play_audio_from_path to proceed immediately
+            play_audio_from_path(temp_audio_path, start_event)
+            logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Finished streaming: {temp_audio_path}")
+
         except queue.Empty:
-            pass
-        except Exception as qe:
-             print(f"{ColorText.RED}[PlaybackWorker] Error clearing queue on exit: {qe}{ColorText.END}")
-        print(f"{ColorText.PURPLE}[PlaybackWorker]{ColorText.END} Worker thread finished.")
+             # This shouldn't happen with blocking get(), but handle defensively
+             logger.warning(f"{ColorText.YELLOW}[PlaybackWorker-RTMP] Queue reported empty unexpectedly.{ColorText.END}")
+             time.sleep(0.05) # Avoid busy-waiting
+             continue
+        except Exception as e:
+            logger.error(f"{ColorText.RED}[PlaybackWorker-RTMP] Error processing audio chunk: {e}{ColorText.END}", exc_info=True)
+            # Optionally, add a short sleep to prevent rapid error loops
+            time.sleep(0.1)
+        finally:
+            # 3. Clean up the temporary file
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.remove(temp_audio_path)
+                    # logger.debug(f"[PlaybackWorker-RTMP] Deleted temp file: {temp_audio_path}")
+                except OSError as e:
+                    logger.error(f"{ColorText.RED}[PlaybackWorker-RTMP] Error deleting temp file {temp_audio_path}: {e}{ColorText.END}")
+            # Ensure task_done is called even if errors occur
+            if playback_active: # Don't call after receiving None
+                 try:
+                     playback_queue.task_done()
+                 except ValueError:
+                     pass # Ignore if called multiple times for the same item on error
+
+    logger.info(f"{ColorText.PURPLE}[PlaybackWorker-RTMP]{ColorText.END} Worker thread finished.")
 
 
 # --- Flask Routes ---
@@ -656,7 +747,7 @@ def text_to_blendshapes_route():
         # Start workers
         llm_thread = threading.Thread(
             target=llm_streaming_worker,
-            args=(models["llm_model"], models["llm_tokenizer"], prompt, device),
+            args=(models, prompt, device), # Pass the whole models dictionary
             daemon=True
         )
         tts_thread = threading.Thread(
@@ -783,7 +874,7 @@ def stream_text_to_blendshapes_route():
             print(f"{ColorText.GREEN}[API /stream]{ColorText.END} Starting LLM worker...")
             llm_thread = threading.Thread(
                 target=llm_streaming_worker,
-                args=(models["llm_model"], models["llm_tokenizer"], prompt, device),
+                args=(models, prompt, device), # Pass the whole models dictionary
                 daemon=True
             )
             print(f"{ColorText.GREEN}[API /stream]{ColorText.END} Starting TTS+Blendshape worker...")

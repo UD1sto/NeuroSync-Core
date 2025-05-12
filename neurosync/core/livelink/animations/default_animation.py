@@ -6,6 +6,7 @@ import time
 import socket
 import pandas as pd
 from threading import Event
+from pathlib import Path
 
 from neurosync.core.livelink.livelink_init import FaceBlendShape, UDP_PORT
 from neurosync.core.livelink.animations.blending_anims import blend_animation_start_end
@@ -20,8 +21,8 @@ def load_animation(csv_path):
     return data.values
 # ==================== DEFAULT ANIMATION SETUP ====================
 
-# Path to the default animation CSV file
-ground_truth_path = r"neurosync/core/livelink/animations/default_anim/default.csv"
+# Determine path relative to this Python file so it works regardless of CWD
+ground_truth_path = Path(__file__).parent / "default_anim" / "default.csv"
 
 # Load the default animation data
 default_animation_data = load_animation(ground_truth_path)

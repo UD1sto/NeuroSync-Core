@@ -1,23 +1,39 @@
+# -----------------------------------------------------------------------------
+# NeuroSync code + BYOC adapter
+# -----------------------------------------------------------------------------
+
 # Use NVIDIA's PyTorch container as base
 FROM nvcr.io/nvidia/pytorch:23.04-py3
 
 # Set working directory
 WORKDIR /app
 
-# Copy F5-TTS source code
-COPY ./F5-TTS /app/F5-TTS
+# Copy NeuroSync core source first so that editable install can resolve deps
+COPY ./NeuroSync-Core /app/NeuroSync-Core
 
-# Install the package in development mode
-WORKDIR /app/F5-TTS
-RUN pip install -e .
+# Copy worker adapter (server_adapter, entry scripts)
+COPY ./neurosync-worker/ /app/
 
-# Make sure the f5-tts_infer-socket command is available
-# The exact path depends on how it's installed, might need adjustment
-RUN ln -s /app/F5-TTS/src/f5_tts/runtime/triton_trtllm/scripts/infer_socket.py /usr/local/bin/f5-tts_infer-socket && \
-    chmod +x /usr/local/bin/f5-tts_infer-socket
+# Python path so that neurosync modules are discoverable even without pip install
+ENV PYTHONPATH="/app/NeuroSync-Core:${PYTHONPATH}"
 
-# Set the entrypoint
-ENTRYPOINT ["f5-tts_infer-socket"]
+# Install PortAudio library
+RUN apt-get update && apt-get install -y libportaudio2 libasound2-dev && rm -rf /var/lib/apt/lists/*
 
-# Default command (can be overridden)
-CMD ["--port", "5055", "--host", "0.0.0.0"]
+# Install runtime dependencies for BYOC adapter and (optionally) editable NeuroSync
+RUN pip install --no-cache-dir \
+    requests \
+    requests-toolbelt \
+    fastapi \
+    "uvicorn[standard]" \
+    jsonschema && \
+    pip install --no-cache-dir -r /app/NeuroSync-Core/requirements.txt && \
+    pip install -e /app/NeuroSync-Core || true
+
+# Ensure entrypoint scripts are executable
+RUN chmod +x /app/entrypoint.sh /app/combined_entrypoint.sh
+
+# Final entrypoint: runs both NeuroSync core API (Flask) and BYOC adapter
+ENTRYPOINT ["/app/combined_entrypoint.sh"]
+
+# No CMD – combined entrypoint launches both processes.

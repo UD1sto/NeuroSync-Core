@@ -5,6 +5,7 @@
 import re
 import string
 from queue import Queue
+import os
 
 class SentenceBuilder:
     """
@@ -17,10 +18,22 @@ class SentenceBuilder:
         "vs.", "e.g.", "i.e.", "etc.", "p.s."
     }
 
-    def __init__(self, chunk_queue, max_chunk_length=500, flush_token_count=300):
+    def __init__(self, chunk_queue, max_chunk_length=500, flush_token_count=300, respect_sentence_endings: bool = True):
+        """
+        Args:
+            chunk_queue (Queue): Queue where ready-to-speak text chunks will be published.
+            max_chunk_length (int): Maximum character length of the buffered text before an automatic flush.
+            flush_token_count (int): Maximum number of tokens to buffer before an automatic flush.
+            respect_sentence_endings (bool): When *True* (default) the builder will flush as soon as a sentence-
+                ending punctuation (., !, ?) is encountered. When *False* it will ignore punctuation boundaries
+                and rely only on *max_chunk_length* / *flush_token_count* / newlines.  Disabling this can be
+                helpful for truly continuous audio streaming because many TTS engines introduce long pauses at
+                sentence boundaries which makes the VTuber speech sound staccato.
+        """
         self.chunk_queue = chunk_queue
         self.max_chunk_length = max_chunk_length
         self.flush_token_count = flush_token_count
+        self.respect_sentence_endings = respect_sentence_endings
 
         # Internal buffer to accumulate tokens
         self.buffer = []
@@ -53,8 +66,8 @@ class SentenceBuilder:
             self._flush_buffer()
             return
 
-        # Flush if we detect a sentence end (unless it is an abbreviation)
-        if self._ends_sentence(token):
+        # Flush if we detect a sentence end (unless it's an abbreviation) *and* this behaviour is enabled
+        if self.respect_sentence_endings and self._ends_sentence(token):
             if not self._is_abbreviation():
                 self._flush_buffer()
 
@@ -96,6 +109,10 @@ class SentenceBuilder:
 
     def _flush_buffer(self, force=False):
         chunk_text_val = ''.join(self.buffer).strip()
+        # Debug: emit log about flushing behaviour (can be toggled via env)
+        if os.getenv("SB_DEBUG", "false").lower() == "true":
+            flush_reason = "forced" if force else "auto"
+            print(f"[SentenceBuilder] Flushing buffer ({flush_reason}): '{chunk_text_val[:80]}{'...' if len(chunk_text_val) > 80 else ''}'")
         # Clean the chunk text using the helper function.
         clean_chunk = clean_text_for_tts(chunk_text_val)
         if clean_chunk:  # Only enqueue if there's something meaningful.

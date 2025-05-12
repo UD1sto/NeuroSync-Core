@@ -4,6 +4,7 @@ import time
 import threading
 from collections import deque
 import redis # type: ignore
+from typing import List, Dict
 
 # Assuming config is in neurosync.core.config
 from neurosync.core.config import config as app_config # Rename to avoid conflict
@@ -159,7 +160,7 @@ class SCBStore:
         }
         self.append(entry)
 
-    def get_log_entries(self, count: int) -> list[dict]:
+    def get_log_entries(self, count: int) -> List[Dict]:
         """Retrieves the most recent 'count' entries from the SCB log."""
         if count <= 0:
             return []
